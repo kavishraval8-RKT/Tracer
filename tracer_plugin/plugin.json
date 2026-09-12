@@ -1,0 +1,22 @@
+{
+  "identifier": "com.tracer.copilot",
+  "name": "Tracer Copilot",
+  "description": "Describe a circuit in plain English; Tracer generates the KiCad schematic and merges it into the open sheet.",
+  "runtime": {
+    "type": "python",
+    "min_version": "3.9"
+  },
+  "actions": [
+    {
+      "identifier": "open-copilot",
+      "name": "Tracer Copilot",
+      "description": "Open the Tracer Copilot panel to generate a circuit from a prompt.",
+      "show-button": true,
+      "scopes": [
+        "schematic",
+        "pcb"
+      ],
+      "entrypoint": "tracer_ipc.py"
+    }
+  ]
+}

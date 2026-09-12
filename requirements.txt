@@ -1,0 +1,44 @@
+# Tracer backend dependencies.
+#
+# Install into a normal Python 3.9+ virtualenv -- NOT into KiCad's bundled
+# Python:
+#
+#     python -m venv venv
+#     venv\Scripts\activate        # Windows
+#     source venv/bin/activate     # macOS / Linux
+#     pip install -r requirements.txt
+#
+# Deliberately absent, and they must stay absent:
+#
+#   pcbnew    ships inside KiCad; it is a SWIG module bound to the exact KiCad
+#             build and is not on PyPI at all.
+#   wxPython  ships inside KiCad. The plugin uses KiCad's own copy, and the
+#             IPC virtualenv sees it through --system-site-packages. Installing
+#             a second copy shadows the one KiCad is actually running and
+#             produces mismatched-ABI crashes.
+#
+# Lower bounds rather than exact pins: these are the versions Tracer is
+# developed against, and testers are on assorted Python versions.
+
+# --- HTTP layer -------------------------------------------------------------
+fastapi>=0.115.5
+uvicorn>=0.30.0
+pydantic>=2.9.0
+
+# --- the layout engine ------------------------------------------------------
+# Reads and writes .kicad_sch files. Used by generator.py and, when it happens
+# to be importable in-process, by the plugin's tracer_inject.
+kicad-sch-api>=0.5.6
+
+# --- the agent --------------------------------------------------------------
+# NOTE: google-generativeai is Google's *legacy* Gemini SDK and is deprecated
+# upstream in favour of `google-genai`. Tracer still targets the legacy client;
+# migrating is tracked separately. agent.py silences its deprecation warning
+# because the warning corrupted the JSON on stdout that the plugin parses.
+google-generativeai>=0.8.6
+requests>=2.32.0
+
+# --- optional ---------------------------------------------------------------
+# Only used by deploy_plugin.py, to validate plugin.json against KiCad's own
+# schema before installing. The script skips validation if this is absent.
+jsonschema>=4.23.0

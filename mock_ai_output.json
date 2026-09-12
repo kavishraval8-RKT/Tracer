@@ -1,0 +1,233 @@
+{
+  "_description": "Mock AI output for Tracer. One circuit block. 'schema' documents the contract; 'block' is the payload generator.py consumes.",
+  "schema": {
+    "block": {
+      "name": "string  - human name of the circuit block",
+      "sheet": "string - KiCad paper size, e.g. 'A4'. Controller is centred on this sheet.",
+      "grid_mm": "number - snap grid. 1.27 = 50 mil, the KiCad schematic standard.",
+      "layout": {
+        "channel_mm": "number - clear routing channel reserved between adjacent columns",
+        "row_pitch_mm": "number - optional override; default = tallest symbol + channel, snapped to grid",
+        "body_margin_mm": "number - keep-out padding added around each symbol's pin extents"
+      },
+      "components": [
+        {
+          "ref": "string       - reference designator, e.g. 'R1'",
+          "value": "string     - component value, e.g. '330'",
+          "symbol": "string    - KiCad symbol lib id, e.g. 'Device:R'",
+          "footprint": "string - KiCad footprint lib id",
+          "column": "integer   - signal-flow stage. Sorted ascending = strict left-to-right placement.",
+          "row": "integer      - vertical slot within the column. 0 = the controller's row (sheet centre); negative = above.",
+          "rotation": "number  - optional, 0/90/180/270. Used to aim pins along the signal flow.",
+          "role": "string      - optional. Exactly one component should be 'controller'; it is pinned dead centre."
+        }
+      ],
+      "nets": [
+        {
+          "name": "string  - net name, e.g. '+3V3'",
+          "class": "string - 'signal' (default) draws orthogonal wires; 'power' places net labels only",
+          "connections": [
+            { "ref": "string - component ref", "pin": "string - pin number" }
+          ]
+        }
+      ]
+    },
+    "_notes": [
+      "x/y offsets from the previous schema are gone. Absolute coordinates are now derived by the layout",
+      "engine from (column, row) so that placement is deterministic and always lands on the grid.",
+      "Rails ('power' class) deliberately carry no wires - label-only rails are what stop an 8-pin GND",
+      "net from becoming spaghetti across the whole sheet."
+    ]
+  },
+  "block": {
+    "name": "ATtiny85 Dual LED Blinker",
+    "sheet": "A4",
+    "grid_mm": 1.27,
+    "layout": {
+      "channel_mm": 12.7,
+      "body_margin_mm": 2.54
+    },
+    "components": [
+      {
+        "ref": "J1",
+        "value": "PWR_IN_5V",
+        "symbol": "Connector_Generic:Conn_01x02",
+        "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+        "column": 0,
+        "row": 0,
+        "rotation": 180
+      },
+      {
+        "ref": "U2",
+        "value": "AMS1117-3.3",
+        "symbol": "Regulator_Linear:AMS1117-3.3",
+        "footprint": "Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+        "column": 1,
+        "row": 0
+      },
+      {
+        "ref": "C1",
+        "value": "10uF",
+        "symbol": "Device:C",
+        "footprint": "Capacitor_SMD:C_0805_2012Metric",
+        "column": 1,
+        "row": -1
+      },
+      {
+        "ref": "C2",
+        "value": "22uF",
+        "symbol": "Device:C",
+        "footprint": "Capacitor_SMD:C_0805_2012Metric",
+        "column": 1,
+        "row": 1
+      },
+      {
+        "ref": "U1",
+        "value": "ATtiny85-20P",
+        "symbol": "MCU_Microchip_ATtiny:ATtiny85-20P",
+        "footprint": "Package_DIP:DIP-8_W7.62mm",
+        "column": 2,
+        "row": 0,
+        "role": "controller"
+      },
+      {
+        "ref": "C3",
+        "value": "100nF",
+        "symbol": "Device:C",
+        "footprint": "Capacitor_SMD:C_0603_1608Metric",
+        "column": 2,
+        "row": 1
+      },
+      {
+        "ref": "TP1",
+        "value": "TP_LED1",
+        "symbol": "Connector:TestPoint",
+        "footprint": "TestPoint:TestPoint_Pad_D1.5mm",
+        "column": 3,
+        "row": -2
+      },
+      {
+        "ref": "R1",
+        "value": "330",
+        "symbol": "Device:R",
+        "footprint": "Resistor_SMD:R_0603_1608Metric",
+        "column": 3,
+        "row": -1,
+        "rotation": 90
+      },
+      {
+        "ref": "R2",
+        "value": "330",
+        "symbol": "Device:R",
+        "footprint": "Resistor_SMD:R_0603_1608Metric",
+        "column": 3,
+        "row": 0,
+        "rotation": 90
+      },
+      {
+        "ref": "R3",
+        "value": "10k",
+        "symbol": "Device:R",
+        "footprint": "Resistor_SMD:R_0603_1608Metric",
+        "column": 3,
+        "row": 1,
+        "rotation": 270
+      },
+      {
+        "ref": "D1",
+        "value": "GREEN",
+        "symbol": "Device:LED",
+        "footprint": "LED_SMD:LED_0603_1608Metric",
+        "column": 4,
+        "row": -1,
+        "rotation": 180
+      },
+      {
+        "ref": "D2",
+        "value": "RED",
+        "symbol": "Device:LED",
+        "footprint": "LED_SMD:LED_0603_1608Metric",
+        "column": 4,
+        "row": 0,
+        "rotation": 180
+      }
+    ],
+    "nets": [
+      {
+        "name": "VIN",
+        "class": "power",
+        "connections": [
+          { "ref": "J1", "pin": "1" },
+          { "ref": "C1", "pin": "1" },
+          { "ref": "U2", "pin": "3" }
+        ]
+      },
+      {
+        "name": "+3V3",
+        "class": "power",
+        "connections": [
+          { "ref": "U2", "pin": "2" },
+          { "ref": "C2", "pin": "1" },
+          { "ref": "C3", "pin": "1" },
+          { "ref": "U1", "pin": "8" },
+          { "ref": "R3", "pin": "1" }
+        ]
+      },
+      {
+        "name": "GND",
+        "class": "power",
+        "connections": [
+          { "ref": "J1", "pin": "2" },
+          { "ref": "U2", "pin": "1" },
+          { "ref": "C1", "pin": "2" },
+          { "ref": "C2", "pin": "2" },
+          { "ref": "C3", "pin": "2" },
+          { "ref": "U1", "pin": "4" },
+          { "ref": "D1", "pin": "1" },
+          { "ref": "D2", "pin": "1" }
+        ]
+      },
+      {
+        "name": "RESET",
+        "class": "signal",
+        "connections": [
+          { "ref": "U1", "pin": "1" },
+          { "ref": "R3", "pin": "2" }
+        ]
+      },
+      {
+        "name": "LED1_CTRL",
+        "class": "signal",
+        "connections": [
+          { "ref": "U1", "pin": "5" },
+          { "ref": "R1", "pin": "1" },
+          { "ref": "TP1", "pin": "1" }
+        ]
+      },
+      {
+        "name": "LED1_A",
+        "class": "signal",
+        "connections": [
+          { "ref": "R1", "pin": "2" },
+          { "ref": "D1", "pin": "2" }
+        ]
+      },
+      {
+        "name": "LED2_CTRL",
+        "class": "signal",
+        "connections": [
+          { "ref": "U1", "pin": "6" },
+          { "ref": "R2", "pin": "1" }
+        ]
+      },
+      {
+        "name": "LED2_A",
+        "class": "signal",
+        "connections": [
+          { "ref": "R2", "pin": "2" },
+          { "ref": "D2", "pin": "2" }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,45 @@
+# --- secrets ----------------------------------------------------------------
+# Never commit a real key. .env.example is the template that IS committed.
+.env
+.env.*
+!.env.example
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtualenvs, including the one currently sitting in this repo.
+venv/
+.venv/
+env/
+
+# --- Tracer output ----------------------------------------------------------
+# Everything the engine emits. All of it is reproducible from
+# mock_ai_output.json, so none of it belongs in the repository.
+generated/
+test_board/
+*.kicad_sch
+
+# ...except the sample payload, which is an input, not an output.
+!mock_ai_output.json
+
+# KiCad's own sidecar files, written next to a schematic when it is opened.
+*.kicad_prl
+*-backups/
+fp-info-cache
+
+# --- packaging --------------------------------------------------------------
+# Built by the PCM packaging step; regenerate rather than commit.
+tracer_plugin.zip
+*.zip
+
+# --- editors / OS -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store

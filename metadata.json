@@ -1,0 +1,23 @@
+{
+    "$schema": "https://go.kicad.org/pcm/schemas/v2",
+    "name": "Tracer Copilot",
+    "description": "AI Copilot for KiCad Schematics.",
+    "description_full": "Natural language circuit generation via LLM.",
+    "identifier": "com.github.kavishraval.tracer",
+    "type": "plugin",
+    "author": {
+        "name": "Kavish Raval",
+        "contact": {
+            "github": "https://github.com/kavishraval"
+        }
+    },
+    "license": "GPL-3.0-or-later",
+    "resources": {},
+    "versions": [
+        {
+            "version": "1.0",
+            "status": "stable",
+            "kicad_version": "10.0"
+        }
+    ]
+}

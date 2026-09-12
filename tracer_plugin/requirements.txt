@@ -1,0 +1,34 @@
+# KiCad's IPC plugin manager REQUIRES this file for any plugin whose manifest
+# declares "runtime": {"type": "python"}. Without it the manager creates the
+# plugin's virtualenv, upgrades pip, then logs
+#     Manager: error: requirements.txt not found at <path>
+# and never reaches "marking <id> as ready" -- so the plugin is missing from
+# Preferences > Plugins entirely, with no error row to explain why.
+#
+# KiCad installs these itself, into a virtualenv it manages at
+#     <cache>/python-environments/com.tracer.copilot/
+# so nothing here needs installing by hand.
+#
+# Keep this list minimal and keep it separate from the backend's
+# requirements.txt in the repository root: everything listed here gets
+# installed inside KiCad on every tester's machine.
+#
+# Deliberately absent, and they must stay absent:
+#
+#   pcbnew    ships inside KiCad and is not on PyPI.
+#   wxPython  ships inside KiCad. This virtualenv is created with
+#             --system-site-packages, so KiCad's own wx is already importable;
+#             a second copy would shadow it and crash on ABI mismatch.
+#
+#   google-generativeai / requests
+#             the agent runs OUT of process, in whichever system Python
+#             carries the Gemini SDK (see find_python in tracer_action.py), so
+#             the SDK must not be installed in here.
+
+# Official KiCad IPC API bindings; imported as `kipy`.
+kicad-python>=0.8.0
+
+# Lets tracer_inject merge the generated block in-process instead of shelling
+# out to another interpreter. Optional in principle -- tracer_action falls back
+# to a subprocess when this import fails -- but in-process is much faster.
+kicad-sch-api>=0.5.6
