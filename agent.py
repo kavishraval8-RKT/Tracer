@@ -4,12 +4,17 @@ Sits in front of `app.py`: a prompt goes to Gemini, which answers either with a
 circuit block in the engine's JSON schema or with a clarifying question, and a
 finished block is POSTed straight to the running backend.
 
-    $env:GEMINI_API_KEY = "..."               # PowerShell
+The Gemini key comes from the GEMINI_API_KEY environment variable, or from a
+.env file beside this script. Never from source. See .env.example.
+
     uvicorn app:app --reload --port 8000      # in another terminal
     python agent.py
 
-Two entry points:
+Three entry points:
 
+    python agent.py --check-key               says where the key was found and
+                                              whether Gemini accepts it; exits
+                                              0 on success, 1 on failure
     python agent.py "a 555 astable at 1 Hz"   interactive; asks follow-ups at
                                               the console and waits for answers
     python agent.py --json                    one JSON request on stdin, one
@@ -764,7 +769,62 @@ def _ask_at_console(question: str) -> Optional[str]:
         return None
 
 
+def _check_key() -> int:
+    """Report where the key came from and whether Gemini actually accepts it.
+
+    Onboarding a tester is where key setup goes wrong, and the two failure
+    modes look identical from the outside: a key that was never picked up, and
+    a key that was picked up but is rejected. So this says which file or
+    variable the key came from, then spends one tiny request proving it works.
+    """
+    env_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    dotenv_path = HERE / ".env"
+
+    if env_key:
+        source = "the GEMINI_API_KEY environment variable"
+    elif _load_dotenv().get("GEMINI_API_KEY"):
+        source = str(dotenv_path)
+    else:
+        source = None
+
+    try:
+        key = _api_key()
+    except RuntimeError as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr, flush=True)
+        if dotenv_path.is_file():
+            print(f"\n{dotenv_path} exists but carries no usable key.",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"\nThere is no {dotenv_path} yet. Copy .env.example to "
+                  f".env and paste your key into it.", file=sys.stderr, flush=True)
+        return 1
+
+    print(f"[ok]   key found in {source}", flush=True)
+    # Only ever show the ends: enough to tell two keys apart, never enough to
+    # reuse if this output gets pasted into an issue.
+    print(f"       {key[:6]}...{key[-4:]}  ({len(key)} characters)", flush=True)
+
+    if env_key and _load_dotenv().get("GEMINI_API_KEY"):
+        print("[note] .env also sets GEMINI_API_KEY; the environment variable "
+              "wins.")
+
+    print(f"[..]   asking Gemini to confirm it ({MODEL_NAME})...", flush=True)
+    try:
+        genai.configure(api_key=key)
+        genai.GenerativeModel(MODEL_NAME).generate_content(
+            "Reply with the single word: ok")
+    except Exception as exc:  # noqa: BLE001 -- every failure is reported the same way
+        print(f"[FAIL] {_readable_api_error(exc)}", file=sys.stderr, flush=True)
+        return 1
+
+    print("[ok]   Gemini accepted the key. You are ready to go.", flush=True)
+    return 0
+
+
 if __name__ == "__main__":
+    if "--check-key" in sys.argv[1:]:
+        raise SystemExit(_check_key())
+
     if "--json" in sys.argv[1:]:
         raise SystemExit(_serve_json())
 

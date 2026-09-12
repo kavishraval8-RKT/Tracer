@@ -52,28 +52,98 @@ pip install -r requirements.txt
 
 ### 2. Configure your Gemini API key
 
-Tracer reads `GEMINI_API_KEY` from the environment, falling back to a `.env`
-file in the repository root. Nothing is ever stored in the source.
+Every tester needs **their own** key. It is free, takes about a minute, and is
+never committed — `.env` is gitignored, and no key is ever stored in the source.
+
+#### 2a. Get a key
+
+1. Go to <https://aistudio.google.com/apikey> and sign in with a Google account.
+2. Click **Create API key**.
+3. Copy it. It is a long string starting with `AI` or `AQ`.
+
+Treat it like a password. Don't paste it into chats, screenshots, or issues.
+
+#### 2b. Put it in a `.env` file
+
+From the repository root:
 
 ```bash
-cp .env.example .env     # then paste your key into .env
+cp .env.example .env      # macOS / Linux
+```
+```powershell
+Copy-Item .env.example .env    # Windows PowerShell
 ```
 
-Or set it per shell:
+Open `.env` in any text editor and replace the placeholder with your key, so
+the line reads:
+
+```
+GEMINI_API_KEY=AIza...your-actual-key...
+```
+
+That's it — no quotes needed, no spaces around the `=`, and nothing else to
+change. Both the backend and the KiCad plugin read this file, so you don't
+need to set anything per-terminal or restart anything.
+
+<details>
+<summary>Prefer an environment variable instead of a file?</summary>
+
+That works too, and it takes precedence over `.env`:
 
 ```powershell
-$env:GEMINI_API_KEY = "<your key>"      # PowerShell
+# Windows, this terminal only
+$env:GEMINI_API_KEY = "<your key>"
+
+# Windows, permanently (reopen your terminal afterwards)
+[Environment]::SetEnvironmentVariable('GEMINI_API_KEY','<your key>','User')
 ```
 ```bash
-export GEMINI_API_KEY=<your key>        # bash / zsh
+# macOS / Linux, this shell only
+export GEMINI_API_KEY=<your key>
+
+# macOS / Linux, permanently
+echo 'export GEMINI_API_KEY=<your key>' >> ~/.bashrc   # or ~/.zshrc
 ```
 
-If the key is missing, Tracer tells you so up front rather than failing
-mid-generation.
+The `.env` file is usually easier, because the KiCad plugin launches Python as
+a subprocess and does not always inherit a variable you set in one terminal.
 
-> **Free-tier quota is small** — on the order of 20 requests per model per day.
-> If generation starts failing with quota errors, change `MODEL_NAME` near the
-> top of `agent.py`.
+</details>
+
+#### 2c. Check it works
+
+```bash
+python agent.py --check-key
+```
+
+A working setup prints:
+
+```
+[ok]   key found in /path/to/tracer-engine/.env
+       AIzaSy...Ab12  (39 characters)
+[..]   asking Gemini to confirm it (gemini-3.5-flash)...
+[ok]   Gemini accepted the key. You are ready to go.
+```
+
+It exits `0` on success and `1` on failure, and it tells you **which** file or
+variable the key came from — which is the thing you actually need to know when
+it isn't working.
+
+#### If `--check-key` fails
+
+| What it prints | What to do |
+|---|---|
+| `No Gemini API key found` + `There is no ...\.env yet` | You skipped 2b. Copy `.env.example` to `.env`. |
+| `...\.env exists but carries no usable key` | The file still holds `your_gemini_api_key_here`. Paste your real key over it. |
+| `Gemini rejected the API key` | The key is wrong, or was revoked. Re-copy it from AI Studio; check you didn't include a trailing space or quotes. |
+| `[note] .env also sets GEMINI_API_KEY; the environment variable wins` | You have a stale variable shadowing your file. Either fix the variable or unset it: `Remove-Item Env:GEMINI_API_KEY` / `unset GEMINI_API_KEY`. |
+| `Gemini has no model called ...` | Your key's project doesn't offer that model. Change `MODEL_NAME` near the top of `agent.py`. |
+| `Gemini rate limit reached` | See the quota note below. |
+
+> **Free-tier quota is small** — roughly 20 requests per model per day, counted
+> per model. When you hit the daily cap it resets tomorrow; to keep working
+> now, change `MODEL_NAME` near the top of `agent.py` to a different Gemini
+> model, which gets its own quota.
 
 ### 3. Install the plugin into KiCad
 
@@ -99,11 +169,21 @@ never scanned for IPC plugins, and vice versa.
 > location and ignore your Documents folder. `deploy_plugin.py` reads that
 > variable for you; `--dry-run` prints the resolved paths.
 
-Since the plugin now lives away from the engine, tell it where the engine is:
+Since the plugin now lives away from the engine, tell it where the engine is.
+This has to **persist**: KiCad is a separate process started later, and it will
+not see a variable you set in one terminal.
 
 ```powershell
-$env:TRACER_HOME = "C:\path\to\tracer-engine"
+# Windows -- then restart KiCad
+[Environment]::SetEnvironmentVariable('TRACER_HOME','C:\path\to\tracer-engine','User')
 ```
+```bash
+# macOS / Linux -- then restart KiCad
+echo 'export TRACER_HOME=/path/to/tracer-engine' >> ~/.bashrc   # or ~/.zshrc
+```
+
+Running the plugin straight from the checkout needs no `TRACER_HOME` at all --
+`find_agent()` walks up from `tracer_plugin/` and finds `agent.py` beside it.
 
 ### 4. Start the backend
 
@@ -179,7 +259,8 @@ python agent.py "a 555 astable blinking an LED at 1Hz"
 ## Troubleshooting
 
 **"No Gemini API key found"** — `GEMINI_API_KEY` is not set and there is no
-`.env`. See step 2; the error message lists the exact commands.
+`.env`. Run `python agent.py --check-key`: it reports which file or variable it
+looked at. See step 2 for the fix.
 
 **Plugin missing from the PCB Editor's Tools menu** — it is in the wrong
 directory. Run `python deploy_plugin.py --dry-run` and compare. Remember
