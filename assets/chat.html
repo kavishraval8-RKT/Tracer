@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Tracer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #ffffff;
+      --bg-elev: #f9fafb;
+      --bg-panel: #f9fafb;
+      --border: #e4e4e7;   /* zinc-200 */
+      --border-s: #d4d4d8; /* zinc-300 */
+      --fg: #09090b;       /* zinc-950 */
+      --fg-mute: #52525b;  /* zinc-600 */
+      --fg-dim: #a1a1aa;   /* zinc-400 */
+      --fg-faint: #e4e4e7;
+      --accent: #ef4444;   /* coral / red-500 */
+      --ok: #16a34a;
+      --warn: #d97706;
+      --bad: #dc2626;
+      --bubble: #f5f5f4;   /* stone-100 off-white */
+    }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: transparent;
+      color: var(--fg);
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+      user-select: none;
+    }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-feature-settings: "tnum"; }
+    .selectable, input, textarea { user-select: text; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: rgba(0,0,0,.04); border-radius: 999px; }
+    ::-webkit-scrollbar-thumb { background: rgba(113,113,122,.55); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(63,63,70,.80); background-clip: padding-box; border: 2px solid transparent; }
+
+    .msg-in { animation: fadeIn 220ms ease-out both; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(3px);} to { opacity: 1; transform: none;} }
+
+    /* Accordion */
+    details.acc { border-top: 1px solid var(--border); background: var(--bg); }
+    details.acc[open] { background: var(--bg-panel); }
+    details.acc > summary {
+      list-style: none; cursor: pointer;
+      padding: 10px 14px;
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; color: var(--fg-mute); font-weight: 500;
+    }
+    details.acc > summary::-webkit-details-marker { display: none; }
+    details.acc > summary::before {
+      content: ""; width: 5px; height: 5px;
+      border-right: 1.5px solid var(--fg-mute); border-bottom: 1.5px solid var(--fg-mute);
+      transform: rotate(-45deg); transition: transform 160ms ease; margin-right: 4px;
+    }
+    details.acc[open] > summary::before { transform: rotate(45deg); }
+    details.acc > summary .count {
+      background: var(--bg-elev); border-radius: 999px; padding: 1px 8px;
+      font-size: 10px; color: var(--fg-mute); border: 1px solid var(--border);
+    }
+    details.acc > summary:hover { color: var(--fg); }
+    details.acc > summary .clear {
+      margin-left: auto; font-size: 10px; color: var(--fg-dim);
+      background: transparent; border: none; cursor: pointer;
+      text-transform: uppercase; letter-spacing: 0.16em;
+    }
+    details.acc > summary .clear:hover { color: var(--fg); }
+
+    /* Bubble like ALT TAB */
+    .assistant-bubble {
+      background: var(--bubble);
+      color: #09090b;
+      padding: 14px 16px 12px 16px;
+      border-radius: 14px;
+      border: 1px solid #e7e5e4;
+      font-size: 13px;
+      line-height: 1.55;
+      max-width: 100%;
+      white-space: pre-wrap;
+    }
+    .copy-btn {
+      display: inline-flex; align-items: center; gap: 4px;
+      margin-top: 10px; padding: 3px 8px;
+      background: #ffffff;
+      border: 1px solid #e4e4e7;
+      border-radius: 6px;
+      font-size: 11px; color: #52525b;
+      cursor: pointer;
+    }
+    .copy-btn:hover { background: #f4f4f5; color: #09090b; }
+
+    /* Activity log */
+    .act-line { display: flex; gap: 6px; padding: 3px 14px; font-size: 11px; align-items: baseline; }
+    .act-tag { font-family: 'JetBrains Mono', monospace; font-size: 10px; padding: 1px 5px; border-radius: 3px; letter-spacing: 0.03em; }
+    .act-Act { background: rgba(37,99,235,0.10);  color: #2563eb; }
+    .act-Obs { background: rgba(22,163,74,0.10);  color: var(--ok); }
+    .act-Err { background: rgba(220,38,38,0.10);  color: var(--bad); }
+    .act-Sys { background: rgba(113,113,122,0.10); color: var(--fg-mute); }
+    .act-text { color: var(--fg-mute); flex: 1; word-break: break-word; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; }
+
+    /* Change lines */
+    .chg-line { padding: 4px 14px; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .chg-add { color: var(--ok); }
+    .chg-mod { color: var(--warn); }
+    .chg-del { color: var(--bad); }
+
+    /* Title bar drag */
+    .drag-area { -webkit-app-region: drag; }
+    button, input, .no-drag { -webkit-app-region: no-drag; }
+  </style>
+</head>
+<body class="bg-transparent m-0 p-0 font-sans antialiased h-screen w-screen overflow-hidden text-[#26251E]">
+<div id="app" class="bg-[#F7F7F4] border border-[#E5E7EB] rounded-xl shadow-2xl flex flex-col h-full w-full overflow-hidden box-border">
+
+  <!-- Top Header Bar: Clean horizontal bar with drag, dropdown, and utility buttons -->
+  <header class="bg-white border-b border-[#E5E7EB] px-3 py-2 flex items-center justify-between text-xs cursor-move select-none shrink-0" onmousedown="pyBridge && pyBridge.startDrag && pyBridge.startDrag('chat')">
+    <div class="flex items-center gap-1 font-medium text-[#26251E] cursor-pointer">Chat ▾</div>
+  </header>
+
+  <!-- Scrollable Feed: Chat messages stack naturally from top to bottom -->
+  <div id="chatArea" class="flex-1 overflow-y-auto p-3 space-y-3 min-h-0">
+    <!-- Empty state -->
+    <div id="emptyState" class="flex items-center justify-center h-full">
+      <div class="text-center max-w-xs">
+        <div class="text-5xl mb-3">⚡</div>
+        <div class="text-sm font-medium text-[#26251E] mb-1">Tracer Copilot</div>
+        <div class="text-xs text-gray-500 leading-relaxed">
+          Describe a circuit in plain English.<br/>
+          Tracer generates the schematic and merges it into your sheet.
+        </div>
+      </div>
+    </div>
+
+    <!-- Messages container -->
+    <div id="messages" class="space-y-3"></div>
+
+    <!-- Thinking indicator -->
+    <div id="thinkingRow" class="flex items-center gap-2 text-xs text-gray-500 hidden mt-2">
+      <div class="w-1 h-1 rounded-full bg-gray-400 animate-pulse"></div>
+      <div class="w-1 h-1 rounded-full bg-gray-400 animate-pulse" style="animation-delay:0.15s"></div>
+      <div class="w-1 h-1 rounded-full bg-gray-400 animate-pulse" style="animation-delay:0.3s"></div>
+      <span class="ml-1">thinking…</span>
+    </div>
+  </div>
+
+  <!-- Bottom Drawer / Tabs: Activity & Changes with pill-shaped toggle -->
+  <footer class="border-t border-[#E5E7EB] bg-white shrink-0 min-h-0">
+    <!-- Pill-shaped tab switcher -->
+    <div class="px-3 py-2 flex items-center gap-1.5 bg-[#F7F7F4] text-[11px] font-medium shrink-0">
+      <button id="activityTab" onclick="showTab('activity')"
+              class="flex-1 rounded-full bg-white px-3 py-1.5 text-[#26251E] shadow-sm transition-all">
+        Activity
+        <span id="actCount" class="inline-block ml-1 px-1.5 py-0.5 rounded-full bg-black/[0.06] text-[#26251E] font-mono text-[10px]">0</span>
+      </button>
+      <button id="changesTab" onclick="showTab('changes')"
+              class="flex-1 rounded-full px-3 py-1.5 text-gray-500 transition-all">
+        Changes
+        <span id="chgCount" class="inline-block ml-1 px-1.5 py-0.5 rounded-full bg-black/[0.06] text-gray-500 font-mono text-[10px]">0</span>
+      </button>
+    </div>
+
+    <!-- Activity log content -->
+    <div id="activityAcc" class="max-h-32 overflow-y-auto">
+      <div id="actList" class="py-2"></div>
+    </div>
+
+    <!-- Changes content -->
+    <div id="changesAcc" class="hidden max-h-32 overflow-y-auto">
+      <div id="chgList" class="py-2"></div>
+      <div id="chgActions" class="px-3 py-2 border-t border-[#E5E7EB] hidden flex gap-2">
+        <button id="keepBtn" onclick="pyBridge.keepChanges()"
+                class="flex-1 bg-[#16a34a] hover:bg-[#15803d] text-white px-3 py-1.5 rounded transition-colors font-medium text-xs">
+          Keep
+        </button>
+        <button id="discardBtn" onclick="pyBridge.discardChanges()"
+                class="flex-1 bg-white border border-[#E5E7EB] hover:bg-gray-50 text-[#dc2626] px-3 py-1.5 rounded transition-colors text-xs font-medium">
+          Discard
+        </button>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<!-- Undo modal: chat panel is 620px tall, room for a real list. Fires from dock. -->
+<div id="undoModal" class="hidden fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onclick="if(event.target===this) closeUndoModal()">
+  <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[85vh] overflow-hidden flex flex-col border border-[#E5E7EB]">
+    <div class="p-4 border-b border-[#E5E7EB]">
+      <div class="font-semibold text-sm text-[#26251E]">Undo To Earlier Prompt</div>
+      <div class="text-xs text-gray-500 mt-1 leading-relaxed">Choose the earlier prompt to restore to. This will restore KiCad files to the snapshot from before that prompt and remove later chat history in this conversation.</div>
+    </div>
+    <div id="undoList" class="flex-1 overflow-y-auto p-2 text-xs min-h-[80px]"></div>
+    <div class="p-2 border-t border-[#E5E7EB] flex justify-end">
+      <button onclick="closeUndoModal()" class="px-3 py-1.5 text-xs text-gray-600 hover:text-[#26251E]">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let pyBridge = null;
+let activityItems = [];
+let changeItems = [];
+
+// Global Escape closes the whole app -- exit-hatch when nothing else works.
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && pyBridge) pyBridge.closeWindow();
+});
+
+new QWebChannel(qt.webChannelTransport, function(channel) {
+  pyBridge = channel.objects.pyBridge;
+  pyBridge.userMessage.connect(onUserMessage);
+  pyBridge.assistantMessage.connect(renderAssistant);
+  pyBridge.activityAdded.connect(addActivity);
+  pyBridge.changeAdded.connect(addChange);
+  pyBridge.thinkingChanged.connect(setThinking);
+  pyBridge.kicadStatusChanged.connect(setKicadStatus);
+  pyBridge.targetChanged.connect(setTargetFile);
+  pyBridge.chatCleared.connect(clearAll);
+  pyBridge.changesFinalized.connect(showChangeActions);
+  pyBridge.showUndoModal.connect(openUndoModal);
+  pyBridge.requestInit();
+});
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function el(tag, cls, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+}
+
+function hideEmpty() {
+  document.getElementById('emptyState').style.display = 'none';
+}
+
+function onUserMessage(text) {
+  hideEmpty();
+  const m = document.getElementById('messages');
+  const row = el('div', 'msg-in flex justify-end items-start');
+  row.innerHTML = `<div class="bg-[#ef4444] text-white rounded-2xl px-3 py-2 text-xs max-w-[85%] break-words leading-relaxed selectable">${esc(text)}</div>`;
+  m.appendChild(row);
+  scrollBottom();
+}
+
+function renderAssistant(payload) {
+  hideEmpty();
+  const m = document.getElementById('messages');
+  const body = payload.body || '';
+  const row = el('div', 'msg-in flex flex-col items-start');
+  row.innerHTML = `
+    <div class="assistant-bubble">${esc(body)}</div>
+    <button class="copy-btn" onclick="copyText(this, ${JSON.stringify(body).replace(/"/g,'&quot;')})">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" class="w-3 h-3">
+        <rect x="5.5" y="5.5" width="8" height="8" rx="1"/>
+        <path d="M2.5 10.5v-8a1 1 0 011-1h8"/>
+      </svg>
+      Copy
+    </button>
+  `;
+  m.appendChild(row);
+  scrollBottom();
+}
+
+function copyText(btn, text) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.innerHTML;
+    btn.innerHTML = '✓ Copied';
+    setTimeout(() => { btn.innerHTML = orig; }, 1200);
+  });
+}
+
+function setThinking(on) {
+  document.getElementById('thinkingRow').classList.toggle('hidden', !on);
+}
+
+function scrollBottom() {
+  const a = document.getElementById('chatArea');
+  a.scrollTop = a.scrollHeight;
+}
+
+function addActivity(item) {
+  // item: {kind: 'Act'|'Obs'|'Err'|'Sys', text: string}
+  activityItems.push(item);
+  const list = document.getElementById('actList');
+  const row = el('div', 'act-line');
+  row.innerHTML = `<span class="act-tag act-${esc(item.kind)}">${esc(item.kind)}</span><span class="act-text">${esc(item.text)}</span>`;
+  list.appendChild(row);
+  const countBadges = document.querySelectorAll('#actCount');
+  countBadges.forEach(badge => badge.textContent = activityItems.length);
+  // Auto-open on first entry, keep it open
+  if (activityItems.length === 1) showTab('activity');
+  // Auto-scroll accordion body
+  list.scrollTop = list.scrollHeight;
+}
+
+function clearActivity() {
+  activityItems = [];
+  document.getElementById('actList').innerHTML = '';
+  const countBadges = document.querySelectorAll('#actCount');
+  countBadges.forEach(badge => badge.textContent = '0');
+}
+
+function addChange(item) {
+  // item: {kind: 'add'|'mod'|'del', text: string, n: int}
+  changeItems.push(item);
+  const list = document.getElementById('chgList');
+  const glyph = { add: '+', mod: '~', del: '-' }[item.kind] || '·';
+  const cls = { add: 'chg-add', mod: 'chg-mod', del: 'chg-del' }[item.kind] || '';
+  const row = el('div', 'chg-line ' + cls);
+  row.innerHTML = `${glyph} ${esc(item.n || changeItems.length)}. ${esc(item.text)}`;
+  list.appendChild(row);
+  const countBadges = document.querySelectorAll('#chgCount');
+  countBadges.forEach(badge => badge.textContent = changeItems.length);
+  if (changeItems.length === 1) showTab('changes');
+  list.scrollTop = list.scrollHeight;
+}
+
+function clearChanges() {
+  changeItems = [];
+  document.getElementById('chgList').innerHTML = '';
+  const countBadges = document.querySelectorAll('#chgCount');
+  countBadges.forEach(badge => badge.textContent = '0');
+  document.getElementById('chgActions').classList.add('hidden');
+}
+
+function showChangeActions(on) {
+  document.getElementById('chgActions').classList.toggle('hidden', !on);
+}
+
+function clearAll() {
+  document.getElementById('messages').innerHTML = '';
+  document.getElementById('emptyState').style.display = '';
+  clearActivity();
+  clearChanges();
+}
+
+function setKicadStatus(text) {
+  const s = document.getElementById('kicadStatus');
+  if (s) s.textContent = text;
+}
+
+function setTargetFile(name) {
+  // Target info displayed in kicadStatus in header now
+  const s = document.getElementById('kicadStatus');
+  if (s) s.textContent = name ? `Target: ${name}` : 'no schematic detected';
+}
+
+// ---------------- Undo modal ----------------
+function openUndoModal(items) {
+  const list = document.getElementById('undoList');
+  items = items || [];
+  if (!items.length) {
+    list.innerHTML = '<div class="p-6 text-gray-400 text-center">No prompts to undo yet. Successful injects will show up here.</div>';
+  } else {
+    list.innerHTML = '';
+    items.forEach(it => {
+      const row = document.createElement('button');
+      row.className = 'w-full text-left px-3 py-2.5 rounded hover:bg-[#f5f5f4] transition-colors text-[#26251E] mb-1 leading-snug';
+      const promptEsc = (it.prompt || '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+      row.innerHTML = `<span class="text-gray-500 mono">${it.ts}</span> · <span class="font-semibold">${it.mode}</span> · ${promptEsc}`;
+      row.onclick = () => {
+        pyBridge.undoTo(it.index, function(_res) { closeUndoModal(); });
+      };
+      list.appendChild(row);
+    });
+  }
+  document.getElementById('undoModal').classList.remove('hidden');
+}
+function closeUndoModal() {
+  document.getElementById('undoModal').classList.add('hidden');
+}
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeUndoModal();
+});
+
+function showTab(name) {
+  const activity = name === 'activity';
+  document.getElementById('activityAcc').classList.toggle('hidden', !activity);
+  document.getElementById('changesAcc').classList.toggle('hidden', activity);
+  document.getElementById('activityTab').className = activity
+    ? 'flex-1 rounded-full bg-white px-3 py-1.5 text-[#26251E] shadow-sm'
+    : 'flex-1 rounded-full px-3 py-1.5 text-gray-500';
+  document.getElementById('changesTab').className = activity
+    ? 'flex-1 rounded-full px-3 py-1.5 text-gray-500'
+    : 'flex-1 rounded-full bg-white px-3 py-1.5 text-[#26251E] shadow-sm';
+}
+</script>
+</body>
+</html>

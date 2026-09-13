@@ -1631,7 +1631,7 @@ def _build_once(block: dict, pitch_floor: float = 0.0):
 
 
 def main() -> None:
-    in_path = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "mock_ai_output.json"
+    in_path = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "legacy_plugin" / "mock_ai_output.json"
     out_path = Path(sys.argv[2]) if len(sys.argv) > 2 else HERE / "tracer_output.kicad_sch"
 
     block = load_block(in_path)

@@ -411,6 +411,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=DEV_ORIGINS,
+    allow_origin_regex=r"^file://",
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],

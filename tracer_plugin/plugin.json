@@ -12,6 +12,8 @@
       "name": "Tracer Copilot",
       "description": "Open the Tracer Copilot panel to generate a circuit from a prompt.",
       "show-button": true,
+      "icons-light": ["icon.png"],
+      "icons-dark": ["icon.png"],
       "scopes": [
         "schematic",
         "pcb"

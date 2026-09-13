@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Tracer Dock</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #ffffff;
+      --bg-elev: #f9fafb;
+      --border: #e4e4e7;   /* zinc-200 */
+      --border-s: #d4d4d8; /* zinc-300 */
+      --fg: #09090b;       /* zinc-950 */
+      --fg-mute: #52525b;  /* zinc-600 */
+      --fg-dim: #a1a1aa;   /* zinc-400 */
+      --accent: #ef4444;   /* coral / red-500 */
+      --accent-h: #dc2626; /* red-600 */
+      --danger: #b93a3a;
+      --danger-h: #c74d4d;
+    }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: transparent;
+      color: var(--fg);
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+      user-select: none;
+    }
+    input, textarea { user-select: text; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(156, 163, 175, .55); border-radius: 999px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(107, 114, 128, .75); }
+
+    /* Custom-styled selects: extra right padding for the caret, no overlap. */
+    select {
+      -webkit-appearance: none; appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none' stroke='%2352525b' stroke-width='1.4'><path d='M1 1l4 4 4-4'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 8px center;
+      padding-right: 22px !important;
+    }
+
+    /* Send button state morph: idle → busy → paused */
+    .send-idle  { background: var(--accent); color: #ffffff; }
+    .send-idle:hover { background: var(--accent-h); }
+    .send-busy  { background: #18181b; color: #ffffff; } /* zinc-900 "stop" */
+    .send-busy:hover { background: #27272a; }
+    .send-paused{ background: #e4e4e7; color: #09090b; }
+    .send-paused:hover { background: #d4d4d8; }
+  </style>
+</head>
+<body class="bg-transparent m-0 p-0 font-sans antialiased h-screen w-screen overflow-hidden text-[#26251E]">
+<!-- Single rounded pill card with two-row vertical layout -->
+<div id="app" class="bg-white border border-[#E5E7EB] rounded-[28px] shadow-2xl flex flex-col justify-between px-4 py-3 w-full h-full box-border gap-2.5">
+
+  <!-- Top Row: Full-width text input area -->
+  <div class="w-full flex items-center">
+    <textarea id="prompt" rows="1"
+      placeholder="Describe what you want to build or type a command..."
+      class="w-full bg-transparent border-none outline-none focus:ring-0 resize-none text-xs text-[#26251E] placeholder-gray-400 leading-relaxed min-h-[28px] max-h-[220px] py-0.5"></textarea>
+  </div>
+
+  <!-- Bottom Row: Control bar toolbar -->
+  <div class="w-full flex items-center justify-between gap-2 pt-1 border-t border-gray-100">
+    
+    <!-- Left Group: Actions & Dropdowns -->
+    <div class="flex items-center gap-2 shrink-0">
+      <!-- Attach button (+) -->
+      <button onclick="pyBridge.attach()" title="Attach"
+              class="w-7 h-7 flex items-center justify-center text-gray-500 hover:text-[#26251E] hover:bg-black/[0.05] rounded transition-colors shrink-0">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" class="w-3.5 h-3.5">
+          <path stroke-linecap="round" d="M8 3v10M3 8h10"/>
+        </svg>
+      </button>
+
+      <!-- Mode select dropdown -->
+      <select id="modeSelect" onchange="pyBridge.setMode(this.value)"
+        class="appearance-none bg-white border border-[#E5E7EB] rounded-full px-2.5 py-1 text-xs font-medium text-[#26251E] outline-none cursor-pointer shrink-0">
+        <option value="agent">Agent</option>
+        <option value="ask">Ask</option>
+        <option value="plan">Plan</option>
+        <option value="debug">Debug</option>
+      </select>
+
+      <!-- Model select dropdown -->
+      <select id="modelSelect" onchange="pyBridge.setModel(this.value)"
+        class="appearance-none bg-white border border-[#E5E7EB] rounded-full px-2.5 py-1 text-xs font-medium text-[#26251E] outline-none cursor-pointer max-w-[120px] truncate shrink-0">
+        <!-- Populated from bridge -->
+      </select>
+
+      <!-- Auto ERC/DRC checkbox -->
+      <label class="flex items-center gap-1 text-xs text-gray-500 cursor-pointer select-none shrink-0">
+        <input type="checkbox" id="autoErc" onchange="pyBridge.setAutoErc(this.checked)"
+               class="accent-red-500 w-3 h-3"/>
+        Auto ERC/DRC
+      </label>
+    </div>
+
+    <!-- Right Group: Status & Send -->
+    <div class="flex items-center gap-2 shrink-0">
+      <!-- Target chip status -->
+      <div id="targetChip" class="text-[10px] text-gray-400 truncate max-w-[100px] shrink-0">
+        <span id="targetChipText">detecting…</span>
+      </div>
+
+      <!-- Close button (Cancel removed: the Send button morphs into a stop
+           square while busy, so a standalone X was redundant and identical
+           to the window close X.) -->
+      <button onclick="pyBridge.closeWindow()" title="Close Tracer"
+              class="w-7 h-7 flex items-center justify-center text-gray-500 hover:text-white hover:bg-[#b93a3a] rounded transition-colors shrink-0">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" class="w-3 h-3">
+          <path stroke-linecap="round" d="M3 13l10-10M13 13L3 3"/>
+        </svg>
+      </button>
+
+      <!-- Undo button (asks Python to open the modal in the chat panel;
+           the dock is 130px tall — no room to render the list here). -->
+      <button id="undoBtn" onclick="pyBridge && pyBridge.requestUndoModal()" title="Undo to earlier prompt"
+              class="w-8 h-8 flex items-center justify-center text-gray-500 hover:text-[#26251E] hover:bg-black/[0.05] border border-[#E5E7EB] rounded-full transition-colors shrink-0">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" class="w-3.5 h-3.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 8h6a3 3 0 010 6H7M4 8l3-3M4 8l3 3"/>
+        </svg>
+      </button>
+
+      <!-- Coral send button -->
+      <button id="submitBtn" onclick="onSubmit()" title="Send"
+        class="bg-[#ef4444] hover:bg-red-600 text-white rounded-full w-8 h-8 flex items-center justify-center transition-colors shadow-md shrink-0 ml-1">
+        <svg id="iconIdle" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" class="w-3.5 h-3.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M8 12V4m-3 3l3-3 3 3"/>
+        </svg>
+        <svg id="iconBusy" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3 h-3 hidden">
+          <rect x="5" y="5" width="6" height="6" rx="1"/>
+        </svg>
+        <svg id="iconPaused" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3 h-3 hidden">
+          <path d="M5 3l8 5-8 5V3z"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+let pyBridge = null;
+let currentState = 'idle';
+
+// Global Escape closes the whole app.
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && pyBridge) pyBridge.closeWindow();
+});
+
+new QWebChannel(qt.webChannelTransport, function(channel) {
+  pyBridge = channel.objects.pyBridge;
+  pyBridge.thinkingChanged.connect(v => setState(v ? 'busy' : 'idle'));
+  pyBridge.targetChanged.connect(setTarget);
+  pyBridge.modelsAvailable.connect(populateModels);
+  pyBridge.dockInit.connect(applyInit);
+  pyBridge.requestDockInit();
+});
+
+function applyInit(info) {
+  if (info.mode) document.getElementById('modeSelect').value = info.mode;
+  if (info.auto_erc) document.getElementById('autoErc').checked = info.auto_erc;
+  if (info.target_name) setTarget(info.target_name);
+  if (info.models && info.models.length) populateModels(info.models, info.current_model);
+}
+
+function populateModels(list, current) {
+  const s = document.getElementById('modelSelect');
+  s.innerHTML = '';
+  (list || []).forEach(m => {
+    const o = document.createElement('option');
+    o.value = m; o.textContent = m;
+    if (m === current) o.selected = true;
+    s.appendChild(o);
+  });
+}
+
+function setTarget(name) {
+  const chip = document.getElementById('targetChip');
+  const text = document.getElementById('targetChipText');
+  if (name) {
+    chip.className = 'mono text-[10px] max-w-[220px] truncate mr-2 flex items-center gap-1.5 text-[#16a34a]';
+    text.textContent = name;
+    text.className = '';
+  } else {
+    chip.className = 'mono text-[10px] max-w-[220px] truncate mr-2 flex items-center gap-1.5 text-[var(--fg-dim)]';
+    text.textContent = 'no schematic open in KiCad';
+    text.className = '';
+  }
+}
+
+function setState(state) {
+  currentState = state;
+  const btn = document.getElementById('submitBtn');
+  btn.classList.remove('send-idle','send-busy','send-paused');
+  btn.classList.add('send-' + state);
+  document.getElementById('iconIdle').classList.toggle('hidden', state !== 'idle');
+  document.getElementById('iconBusy').classList.toggle('hidden', state !== 'busy');
+  document.getElementById('iconPaused').classList.toggle('hidden', state !== 'paused');
+}
+
+function onSubmit() {
+  if (currentState === 'busy') { pyBridge.cancel(); return; }
+  const inp = document.getElementById('prompt');
+  const t = inp.value.trim();
+  if (!t) return;
+  inp.style.height = 'auto';  // shrink back after send
+  inp.value = '';
+  pyBridge.sendPrompt(t);
+}
+
+const _prompt = document.getElementById('prompt');
+_prompt.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit(); }
+});
+// Auto-grow: reset then set to scrollHeight; CSS max-h caps it.
+_prompt.addEventListener('input', () => {
+  _prompt.style.height = 'auto';
+  _prompt.style.height = _prompt.scrollHeight + 'px';
+});
+
+</script>
+</body>
+</html>

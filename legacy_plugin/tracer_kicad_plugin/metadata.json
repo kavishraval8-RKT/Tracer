@@ -1,0 +1,26 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "name": "Tracer Copilot",
+  "description": "Natural-language schematic copilot for KiCad. Prompt-driven circuit generation with auto-clearance placement, ERC verification, and one-click injection.",
+  "description_full": "Tracer sits alongside KiCad as a floating overlay panel that snaps to your editor window. Describe the circuit you want in plain English; Tracer picks parts, values, and topology, verifies the geometry, and injects the result into your open .kicad_sch. Auto-detects the currently-open schematic; no target picker.",
+  "identifier": "com.tracer.copilot",
+  "type": "plugin",
+  "author": {
+    "name": "Tracer",
+    "contact": {
+      "web": "https://github.com/kavishraval8-RKT/tracer-engine"
+    }
+  },
+  "license": "MIT",
+  "resources": {
+    "homepage": "https://github.com/kavishraval8-RKT/tracer-engine"
+  },
+  "versions": [
+    {
+      "version": "0.1.0",
+      "status": "development",
+      "kicad_version": "8.0"
+    }
+  ],
+  "tags": ["AI", "copilot", "schematic", "generation"]
+}

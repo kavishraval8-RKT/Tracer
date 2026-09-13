@@ -43,3 +43,9 @@ tracer_plugin.zip
 *.swp
 Thumbs.db
 .DS_Store
+
+# --- runtime & tooling artifacts --------------------------------------------
+logs/
+docs/superpowers/
+*.tracer-bak
+*.tracer-bak.*

@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Tracer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg:        #000000;
+      --bg-elev:   #0c0c0c;
+      --bg-panel:  #050505;
+      --bg-subtle: #141414;
+      --border:    #1c1c1c;
+      --border-s:  #2a2a2a;
+      --fg:        #ffffff;
+      --fg-mute:   #a3a3a3;
+      --fg-dim:    #666666;
+      --fg-faint:  #333333;
+      --accent:    #3C83F5;
+      --accent-h:  #5595f7;
+      --ok:        #86efac;
+      --warn:      #fbbf24;
+      --bad:       #f87171;
+    }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      -webkit-font-smoothing: antialiased;
+      font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01", "tnum";
+      letter-spacing: -0.005em;
+      user-select: none;
+    }
+    .serif { font-family: 'Instrument Serif', ui-serif, Georgia, serif; letter-spacing: -0.02em; }
+    .mono  { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-feature-settings: "tnum"; }
+    input, textarea, .selectable { user-select: text; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2f2c25; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }
+
+    .thinking-dot { display: inline-block; width: 3px; height: 3px; border-radius: 50%;
+      background: var(--fg-mute); margin: 0 2px; animation: pulse 1.5s infinite ease-in-out; opacity: 0.6; }
+    .thinking-dot:nth-child(2) { animation-delay: 0.25s; }
+    .thinking-dot:nth-child(3) { animation-delay: 0.5s; }
+    @keyframes pulse { 0%, 60%, 100% { opacity: 0.25;} 30% { opacity: 0.9;} }
+
+    .msg-in { animation: fadeIn 220ms ease-out both; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px);} to { opacity: 1; transform: none;} }
+
+    .focus-ring:focus-within {
+      border-color: rgba(60,131,245,0.5);
+      background: #0e0e0e;
+      box-shadow: 0 0 0 4px rgba(60,131,245,0.06);
+    }
+    .hair { border-color: var(--border); }
+
+    /* Ambient blue radial glow behind hero. */
+    .ambient { position: relative; }
+    .ambient::before {
+      content: ""; position: absolute; inset: -20%; pointer-events: none;
+      background: radial-gradient(60% 45% at 50% 25%, rgba(60,131,245,0.08), transparent 60%);
+      filter: blur(30px); z-index: 0;
+    }
+
+    /* Film grain. */
+    .grain::after {
+      content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 1;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.06 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+      opacity: 0.4; mix-blend-mode: overlay;
+    }
+
+    /* Reasoning accordion: uses native <details>. */
+    details.reasoning { border: 1px solid var(--border); border-radius: 8px; background: #0a0a0a; }
+    details.reasoning[open] { background: #0b0b0b; }
+    details.reasoning > summary {
+      list-style: none; cursor: pointer; padding: 10px 14px;
+      font-size: 11.5px; color: var(--fg-mute); font-weight: 500;
+      display: flex; align-items: center; gap: 8px;
+    }
+    details.reasoning > summary::-webkit-details-marker { display: none; }
+    details.reasoning > summary::before {
+      content: ""; width: 6px; height: 6px; border-right: 1.5px solid var(--fg-mute);
+      border-bottom: 1.5px solid var(--fg-mute); transform: rotate(-45deg);
+      transition: transform 180ms ease;
+    }
+    details.reasoning[open] > summary::before { transform: rotate(45deg); }
+    details.reasoning > summary:hover { color: var(--fg); }
+    details.reasoning .steps { padding: 4px 14px 12px 14px; }
+    details.reasoning .step {
+      display: flex; gap: 10px; padding: 6px 0;
+      font-size: 11.5px; color: var(--fg-mute);
+    }
+    details.reasoning .step .rail {
+      display: flex; flex-direction: column; align-items: center; gap: 2px; padding-top: 6px;
+    }
+    details.reasoning .step .rail .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--border-s); }
+    details.reasoning .step .rail .line { width: 1px; flex: 1; background: var(--border); min-height: 4px; }
+    details.reasoning .step:last-child .rail .line { background: linear-gradient(to bottom, var(--border), transparent); }
+
+    /* Sticky hairline at top of scroll pane. */
+    .fade-top { position: sticky; top: 0; height: 24px; z-index: 5;
+      background: linear-gradient(to bottom, var(--bg), transparent); pointer-events: none; }
+
+    /* Typing placeholder cursor. */
+    .typing-caret::after {
+      content: ""; display: inline-block; width: 2px; height: 1em;
+      background: var(--fg-mute); vertical-align: -0.1em; margin-left: 2px;
+      animation: blink 1.1s infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+  </style>
+</head>
+<body class="h-full">
+  <div class="flex flex-col h-full">
+
+    <!-- =============== TARGET BAR =============== -->
+    <div class="h-11 flex items-center px-5 gap-3 border-b border-[#232323] bg-[var(--bg-panel)] relative z-10 shadow-[0_1px_0_rgba(255,255,255,0.03)]">
+      <div class="flex items-center gap-2 mr-1">
+        <img src="logo.png" class="h-4 w-4 object-contain opacity-90" alt="Tracer"/>
+        <span class="text-[12.5px] font-semibold tracking-tight">Tracer</span>
+        <span class="mono text-[10px] text-[var(--fg-faint)] uppercase tracking-[0.2em] ml-1">v1</span>
+      </div>
+      <div class="w-px h-4 bg-[var(--border)]"></div>
+
+      <button onclick="pyBridge.selectTarget()"
+              class="flex items-center gap-2 px-2.5 py-1 text-[11.5px] font-medium text-[var(--fg-mute)] hover:text-[var(--fg)] transition-colors">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" class="w-3.5 h-3.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V6a2.25 2.25 0 0 1 2.25-2.25h5.379a2.25 2.25 0 0 1 1.591.659l2.121 2.121A2.25 2.25 0 0 0 15.121 7.5H19.5a2.25 2.25 0 0 1 2.25 2.25v3.75m-19.5 0v6.75A2.25 2.25 0 0 0 4.5 22.5h15a2.25 2.25 0 0 0 2.25-2.25V12.75m-19.5 0h19.5"/>
+        </svg>
+        Select target
+      </button>
+
+      <div id="targetChip" class="flex items-center gap-1.5 mono text-[11px] text-[var(--bad)] tracking-tight flex-1 truncate">
+        <span class="text-[8px] leading-none">●</span>
+        <span id="targetChipText">no target</span>
+      </div>
+      <button id="clearTargetBtn" onclick="pyBridge.clearTarget()"
+              class="hidden w-6 h-6 flex items-center justify-center text-[var(--fg-dim)] hover:text-[var(--fg)] transition-colors">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" class="w-3 h-3">
+          <path stroke-linecap="round" d="M5 5l10 10M15 5L5 15"/>
+        </svg>
+      </button>
+      <button onclick="pyBridge.newConversation()"
+              class="flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--fg-mute)] hover:text-[var(--fg)] transition-colors ml-2">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" class="w-3.5 h-3.5">
+          <path stroke-linecap="round" d="M12 5v14m7-7H5"/>
+        </svg>
+        New
+      </button>
+      <div id="busyLabel" class="hidden items-center mono text-[10px] text-[var(--fg-mute)] tracking-[0.18em] uppercase ml-2">
+        <span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span>
+        <span class="ml-2">thinking</span>
+      </div>
+    </div>
+
+    <!-- =============== MAIN CANVAS (single-column, centered) =============== -->
+    <div id="scroller" class="flex-1 overflow-y-auto">
+      <div class="fade-top"></div>
+
+      <div class="mx-auto w-full max-w-3xl px-8 pt-6 pb-32">
+        <!-- HERO (empty state) -->
+        <section id="hero" class="ambient grain relative pt-8 pb-4">
+          <div class="relative z-10 text-center">
+            <div class="mono text-[10px] uppercase tracking-[0.32em] text-[var(--fg-dim)] mb-5 flex items-center justify-center gap-3">
+              <span>Tracer</span>
+              <span class="w-6 h-px bg-[var(--border-s)]"></span>
+              <span class="text-[var(--fg-faint)]">Circuit copilot for KiCad</span>
+            </div>
+            <h1 class="serif text-[56px] font-normal leading-[1.02] tracking-[-0.02em]">
+              A clean circuit
+              <em class="italic text-[var(--fg-mute)]">starts here.</em>
+            </h1>
+            <p id="heroStatus" class="mt-4 text-[11.5px] text-[var(--fg-dim)] mono uppercase tracking-[0.16em]">
+              · engine online
+            </p>
+          </div>
+        </section>
+
+        <!-- Section: try a prompt -->
+        <div id="chipsWrap" class="mt-10">
+          <div class="mono text-[10px] tracking-[0.28em] uppercase text-[var(--fg-dim)] mb-3 flex items-center gap-3">
+            <span>Try a prompt</span>
+            <span class="flex-1 h-px bg-[var(--border)]"></span>
+            <span class="text-[var(--fg-faint)]">04</span>
+          </div>
+          <div id="chips" class="grid grid-cols-1 sm:grid-cols-2 gap-2"></div>
+        </div>
+
+        <!-- Manifesto -->
+        <div id="manifestoWrap" class="mt-14 mb-4">
+          <div class="mono text-[10px] tracking-[0.28em] uppercase text-[var(--fg-dim)] mb-4">On Tracer</div>
+          <p class="serif text-[26px] leading-[1.2] tracking-[-0.015em] text-[var(--fg-mute)] max-w-2xl">
+            <em class="italic text-[var(--fg)]">Describe</em> the circuit.
+            <em class="italic text-[var(--fg)]">Review</em> the plan.
+            <em class="italic text-[var(--fg)]">Inject</em> the diff.
+            <span class="text-[var(--fg-dim)]"> — no cursor lost, no context switched.</span>
+          </p>
+        </div>
+
+        <!-- How it works -->
+        <div id="flowWrap" class="mt-12">
+          <div class="mono text-[10px] tracking-[0.28em] uppercase text-[var(--fg-dim)] mb-4 flex items-center gap-3">
+            <span>How it works</span>
+            <span class="flex-1 h-px bg-[var(--border)]"></span>
+            <span class="text-[var(--fg-faint)]">03 steps</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-3 border hair rounded-lg overflow-hidden divide-y sm:divide-y-0 sm:divide-x divide-[var(--border)]">
+            <div class="p-4">
+              <div class="mono text-[10px] tracking-[0.24em] text-[var(--fg-faint)] mb-2">01</div>
+              <div class="serif text-[18px] text-[var(--fg)] leading-tight">Describe</div>
+              <p class="text-[11.5px] leading-[1.6] text-[var(--fg-dim)] mt-1.5">Prompt Tracer with what you want. It picks parts, values, and net topology.</p>
+            </div>
+            <div class="p-4">
+              <div class="mono text-[10px] tracking-[0.24em] text-[var(--fg-faint)] mb-2">02</div>
+              <div class="serif text-[18px] text-[var(--fg)] leading-tight">Review</div>
+              <p class="text-[11.5px] leading-[1.6] text-[var(--fg-dim)] mt-1.5">Inspect the plan card: component manifest, netlist diff, ERC status.</p>
+            </div>
+            <div class="p-4">
+              <div class="mono text-[10px] tracking-[0.24em] text-[var(--fg-faint)] mb-2">03</div>
+              <div class="serif text-[18px] text-[var(--fg)] leading-tight">Inject</div>
+              <p class="text-[11.5px] leading-[1.6] text-[var(--fg-dim)] mt-1.5">One click merges the verified block into your open .kicad_sch.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Info footer -->
+        <div id="footerWrap" class="mt-12 pt-6 border-t hair grid grid-cols-1 sm:grid-cols-3 gap-6 text-[11px]">
+          <div>
+            <div class="mono text-[9.5px] tracking-[0.24em] uppercase text-[var(--fg-faint)] mb-1.5">Engine</div>
+            <div class="text-[var(--fg-mute)]">FastAPI · <span class="mono">127.0.0.1:8000</span></div>
+            <div class="text-[var(--fg-dim)] mt-0.5">Local · no data leaves your machine except the LLM call.</div>
+          </div>
+          <div>
+            <div class="mono text-[9.5px] tracking-[0.24em] uppercase text-[var(--fg-faint)] mb-1.5">Model</div>
+            <div class="text-[var(--fg-mute)]">Gemini · <span class="mono">auto-rotate</span></div>
+            <div class="text-[var(--fg-dim)] mt-0.5">2.5 Pro → 3.x Flash on quota exhaustion.</div>
+          </div>
+          <div>
+            <div class="mono text-[9.5px] tracking-[0.24em] uppercase text-[var(--fg-faint)] mb-1.5">Shortcuts</div>
+            <div class="text-[var(--fg-mute)] flex flex-wrap gap-x-3 gap-y-1">
+              <span><kbd class="mono px-1 py-0.5 border hair rounded text-[9.5px] text-[var(--fg-mute)]">Enter</kbd> send</span>
+              <span><kbd class="mono px-1 py-0.5 border hair rounded text-[9.5px] text-[var(--fg-mute)]">Shift</kbd>+<kbd class="mono px-1 py-0.5 border hair rounded text-[9.5px] text-[var(--fg-mute)]">Enter</kbd> newline</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- CONVERSATION STREAM: top-anchored, grows downward like Claude -->
+        <div id="messages" class="space-y-4"></div>
+      </div>
+    </div>
+
+    <!-- =============== STICKY INPUT DOCK =============== -->
+    <div class="absolute bottom-0 inset-x-0 pointer-events-none pb-6 z-20">
+      <div class="pointer-events-auto mx-auto w-full max-w-3xl px-8">
+        <div id="inputWrap"
+             class="flex items-end gap-2 bg-[var(--bg-elev)] border border-[var(--border)] rounded-2xl px-3 py-2.5
+                    focus-ring transition-all duration-200 backdrop-blur-md">
+          <textarea id="prompt" rows="1"
+            placeholder="Describe the circuit — e.g. 'ATtiny85 blinker with 3.3V regulator'"
+            class="flex-1 bg-transparent border-0 outline-none resize-none py-1.5 px-1 text-[14px] text-[var(--fg)] placeholder-[var(--fg-dim)] leading-[1.5] max-h-40"></textarea>
+          <button id="sendBtn" onclick="submitPrompt()"
+                  class="shrink-0 flex items-center justify-center w-9 h-9 rounded-lg bg-[var(--fg)] hover:bg-[var(--fg)]/90 text-black disabled:bg-[var(--border-s)] disabled:text-[var(--fg-mute)] transition-all"
+                  title="Send">
+            <svg id="sendIcon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="w-4 h-4">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M10 15V5m0 0l-4 4m4-4l4 4"/>
+            </svg>
+            <svg id="sendSpin" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4 hidden animate-spin">
+              <path stroke-linecap="round" d="M10 3v3"/>
+              <path stroke-linecap="round" opacity="0.3" d="M10 14v3M3 10h3M14 10h3M4.7 4.7l2.1 2.1M13.2 13.2l2.1 2.1M4.7 15.3l2.1-2.1M13.2 6.8l2.1-2.1"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+
+<script>
+// ---------------------------------------------------------------------------
+// bridge
+// ---------------------------------------------------------------------------
+let pyBridge = null;
+let currentPlan = null;
+let pendingLogs = {};
+const PROMPT_CHIPS_FALLBACK = [
+  "ATtiny85 blinker with 3.3V regulator",
+  "ESP32-WROOM with USB-C & CP2102",
+  "555 Timer in astable mode at 1 kHz",
+  "I2C OLED display with pull-up resistors",
+];
+
+new QWebChannel(qt.webChannelTransport, function(channel) {
+  pyBridge = channel.objects.pyBridge;
+  pyBridge.systemMessage.connect(renderSystem);
+  pyBridge.userMessage.connect(renderUser);
+  pyBridge.tracerMessage.connect(renderTracer);
+  pyBridge.planReady.connect(renderPlan);
+  pyBridge.injectResult.connect(renderInjectResult);
+  pyBridge.injectFailed.connect(renderInjectFailure);
+  pyBridge.busyChanged.connect(setBusy);
+  pyBridge.targetChanged.connect(setTargetChip);
+  pyBridge.welcomeReady.connect(renderWelcome);
+  pyBridge.logsAvailable.connect((id, txt) => { pendingLogs[id] = txt; });
+  pyBridge.chatCleared.connect(clearAll);
+  pyBridge.requestWelcome();
+});
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+function el(tag, cls, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+}
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function scrollBottom() {
+  const s = document.getElementById('scroller');
+  s.scrollTop = s.scrollHeight;
+}
+function submitPrompt() {
+  const inp = document.getElementById('prompt');
+  const t = inp.value.trim();
+  if (!t) return;
+  inp.value = '';
+  autoresize();
+  pyBridge.sendPrompt(t);
+}
+function autoresize() {
+  const t = document.getElementById('prompt');
+  t.style.height = 'auto';
+  t.style.height = Math.min(160, t.scrollHeight) + 'px';
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const t = document.getElementById('prompt');
+  t.addEventListener('input', autoresize);
+  t.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); }
+  });
+});
+
+function clearAll() {
+  document.getElementById('messages').innerHTML = '';
+  document.getElementById('messages').style.paddingTop = '';
+  currentPlan = null;
+  expandHero();
+}
+
+const EMPTY_STATE_IDS = ['hero', 'chipsWrap', 'manifestoWrap', 'flowWrap', 'footerWrap'];
+
+function collapseHero() {
+  for (const id of EMPTY_STATE_IDS) {
+    const e = document.getElementById(id);
+    if (e) e.style.display = 'none';
+  }
+  const msgs = document.getElementById('messages');
+  if (msgs) msgs.style.paddingTop = '8px';
+}
+
+function expandHero() {
+  const defaults = { hero: 'block', chipsWrap: 'block', manifestoWrap: 'block', flowWrap: 'block', footerWrap: 'grid' };
+  for (const id of EMPTY_STATE_IDS) {
+    const e = document.getElementById(id);
+    if (e) e.style.display = defaults[id] || 'block';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// welcome / chips
+// ---------------------------------------------------------------------------
+function renderWelcome(info) {
+  const status = document.getElementById('heroStatus');
+  if (info.backend_ok) {
+    status.textContent = '· engine online';
+    status.style.color = 'var(--ok)';
+  } else {
+    status.textContent = '· engine unreachable';
+    status.style.color = 'var(--bad)';
+  }
+  const chips = document.getElementById('chips');
+  chips.innerHTML = '';
+  const list = info.chips || PROMPT_CHIPS_FALLBACK;
+  // Populate the section header's step count with actual number of chips.
+  const wrap = document.getElementById('chipsWrap');
+  if (wrap) {
+    const numSpan = wrap.querySelector('.mono span.text-\\[var\\(--fg-faint\\)\\]');
+    if (numSpan) numSpan.textContent = String(list.length).padStart(2, '0');
+  }
+  list.forEach((text, i) => {
+    const btn = el('button',
+      'text-left px-4 py-3 border border-[var(--border)] hover:border-[var(--border-s)] hover:bg-[var(--bg-elev)] rounded-lg transition-colors group flex items-start gap-3');
+    btn.innerHTML = `
+      <span class="mono text-[10px] tracking-[0.18em] text-[var(--fg-faint)] group-hover:text-[var(--fg-dim)] transition-colors pt-0.5">${String(i + 1).padStart(2, '0')}</span>
+      <span class="text-[13px] text-[var(--fg-mute)] group-hover:text-[var(--fg)] transition-colors flex-1">${esc(text)}</span>
+      <span class="mono text-[10px] tracking-[0.18em] text-[var(--fg-faint)] group-hover:text-[var(--fg-mute)] transition-colors pt-0.5">↵</span>
+    `;
+    btn.onclick = () => {
+      const t = document.getElementById('prompt');
+      t.value = text; t.focus(); autoresize();
+    };
+    chips.appendChild(btn);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// messages
+// ---------------------------------------------------------------------------
+function renderSystem(text) {
+  collapseHero();
+  const m = document.getElementById('messages');
+  const row = el('div', 'msg-in flex items-center gap-2 py-1');
+  row.innerHTML = `<span class="mono text-[10px] tracking-[0.16em] uppercase text-[var(--fg-faint)]">system</span>
+                   <span class="text-[11.5px] text-[var(--fg-dim)] selectable">${esc(text)}</span>`;
+  m.appendChild(row);
+  scrollBottom();
+}
+
+function renderUser(text) {
+  collapseHero();
+  const m = document.getElementById('messages');
+  const row = el('div', 'msg-in flex justify-end');
+  row.innerHTML = `
+    <div class="max-w-[85%] px-4 py-2.5 bg-[var(--bg-elev)] border border-[var(--border)] rounded-2xl text-[14px] text-[var(--fg)] selectable leading-[1.55]">${esc(text)}</div>
+  `;
+  m.appendChild(row);
+  scrollBottom();
+}
+
+// payload: {kind, title, body, log_id, extra, reasoning_steps}
+function renderTracer(payload) {
+  collapseHero();
+  removeThinking();
+  const m = document.getElementById('messages');
+  const kind = payload.kind || 'info';
+  const titleColor = { ask: 'var(--warn)', error: 'var(--bad)', ok: 'var(--ok)', info: 'var(--fg)' }[kind];
+
+  const row = el('div', 'msg-in flex flex-col items-start gap-2 max-w-[92%]');
+  let html = '';
+  if (payload.title) html += `<div class="text-[15px] font-semibold" style="color:${titleColor}">${esc(payload.title)}</div>`;
+  if (payload.body)  html += `<div class="text-[14px] text-[var(--fg)] leading-[1.65] selectable whitespace-pre-wrap">${esc(payload.body)}</div>`;
+  if (payload.extra) html += `<div class="text-[12px] text-[var(--fg-dim)] mt-0.5">${esc(payload.extra)}</div>`;
+  row.innerHTML = html;
+
+  const steps = payload.reasoning_steps || [];
+  if (steps.length) row.appendChild(makeReasoning(steps));
+
+  if (payload.log_id !== null && payload.log_id !== undefined) {
+    const link = el('button',
+      'mono text-[10px] tracking-[0.18em] uppercase text-[var(--fg-dim)] hover:text-[var(--fg-mute)] mt-0.5 transition-colors',
+      '→ view raw log');
+    link.onclick = () => showLogs(payload.log_id);
+    row.appendChild(link);
+  }
+  m.appendChild(row);
+  scrollBottom();
+}
+
+function makeReasoning(steps) {
+  const done = steps.length;
+  const box = el('details', 'reasoning w-full max-w-lg mt-1');
+  box.open = false;
+  const stepsHtml = steps.map((s, i) => `
+    <div class="step">
+      <div class="rail">
+        <div class="dot"></div>
+        <div class="line"></div>
+      </div>
+      <div class="flex-1 pt-1">${esc(s)}</div>
+    </div>
+  `).join('');
+  box.innerHTML = `
+    <summary>Reasoning · ${done} step${done === 1 ? '' : 's'}</summary>
+    <div class="steps">${stepsHtml}</div>
+  `;
+  return box;
+}
+
+// ---------------------------------------------------------------------------
+// plan (inline in the stream)
+// ---------------------------------------------------------------------------
+function renderPlan(plan) {
+  currentPlan = plan;
+  collapseHero();
+  removeThinking();
+  const m = document.getElementById('messages');
+
+  const circuit = plan.circuit || {};
+  const backend = plan.backend || {};
+  const stats = backend.stats || {};
+  const erc = backend.erc || {};
+  const nets = circuit.nets || [];
+  const components = circuit.components || [];
+
+  const ercMark = erc.ran
+    ? (erc.clean ? `<span class="text-[var(--ok)]">ERC clean</span>`
+                 : `<span class="text-[var(--warn)]">ERC: ${(erc.violations||[]).length} violation(s)</span>`)
+    : `<span class="text-[var(--fg-dim)]">ERC not run</span>`;
+
+  const wrap = el('div', 'msg-in w-full mt-2 border hair rounded-2xl bg-[var(--bg-panel)] overflow-hidden');
+  wrap.innerHTML = `
+    <div class="px-6 pt-5 pb-4 border-b hair">
+      <div class="mono mb-2 text-[10px] uppercase tracking-[0.24em] text-[var(--ok)]">Plan ready</div>
+      <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <h2 class="serif text-[30px] font-normal text-[var(--fg)] leading-tight">${esc(circuit.name || 'circuit')}</h2>
+        <div class="text-[11.5px] text-[var(--fg-mute)]">
+          ${stats.components || 0} comps · ${stats.wires || 0} wires · ${stats.nets || nets.length} nets · ${ercMark}
+        </div>
+      </div>
+      <div class="mt-3 text-[11.5px]">
+        ${plan.target_name
+          ? `<span class="text-[var(--fg-mute)]">→ will inject into</span>
+             <span class="mono text-[var(--ok)] ml-1">${esc(plan.target_name)}</span>`
+          : `<span class="text-[var(--warn)]">⚠ no target set — pick a .kicad_sch to enable injection.</span>`}
+      </div>
+    </div>
+
+    <div class="grid md:grid-cols-2 divide-x divide-[var(--border)]">
+      <div>
+        <div class="px-6 py-2.5 border-b hair mono text-[10px] tracking-[0.18em] uppercase text-[var(--fg-mute)]">
+          Component manifest · ${components.length}
+        </div>
+        <div class="divide-y divide-[var(--border)] max-h-64 overflow-y-auto">
+          ${components.map(c => `
+            <div class="flex items-center justify-between gap-3 px-6 py-2">
+              <div class="flex items-baseline gap-3">
+                <span class="mono text-[12px] text-[var(--fg)]">${esc(c.ref || '?')}</span>
+                <span class="text-[12px] text-[var(--fg-mute)]">${esc(c.value || '')}</span>
+              </div>
+              <span class="mono max-w-[52%] truncate text-[10.5px] text-[var(--fg-dim)]">${esc(c.symbol || '')}</span>
+            </div>`).join('')}
+        </div>
+      </div>
+      <div>
+        <div class="px-6 py-2.5 border-b hair mono text-[10px] tracking-[0.18em] uppercase text-[var(--fg-mute)]">
+          + Netlist diff · ${nets.length}
+        </div>
+        <div class="divide-y divide-[var(--border)] max-h-64 overflow-y-auto">
+          ${nets.map(net => `
+            <div class="px-6 py-2">
+              <div class="flex items-center justify-between">
+                <span class="mono text-[12px] text-[var(--fg)]">+ ${esc(net.name)}</span>
+                <span class="mono text-[9.5px] tracking-[0.14em] uppercase text-[var(--fg-dim)]">${esc(net.class || 'signal')}</span>
+              </div>
+              <div class="mono text-[10.5px] text-[var(--fg-dim)] mt-0.5 break-all">
+                ${(net.connections || []).map(c => `${esc(c.ref)}.${esc(c.pin)}`).join('  ·  ')}
+              </div>
+            </div>`).join('')}
+        </div>
+      </div>
+    </div>
+
+    <div class="px-6 py-4 border-t hair flex items-center gap-3 justify-between">
+      <div class="flex items-center gap-3">
+        <button id="planConfirm-${plan.plan_id}"
+                class="flex items-center gap-2 bg-[var(--fg)] hover:bg-white text-[var(--bg)] text-[12.5px] font-semibold px-4 py-2 rounded-lg transition-colors">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" class="w-3.5 h-3.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 10.5l4 4 8-8"/>
+          </svg>
+          Confirm &amp; inject
+        </button>
+        <button id="planCancel-${plan.plan_id}"
+                class="text-[12.5px] font-medium text-[var(--fg-mute)] hover:text-[var(--fg)] px-2 py-2 transition-colors">
+          Dismiss
+        </button>
+      </div>
+      ${plan.log_id !== null && plan.log_id !== undefined
+        ? `<button onclick="showLogs(${plan.log_id})" class="mono text-[10px] tracking-[0.16em] uppercase text-[var(--fg-dim)] hover:text-[var(--fg-mute)] transition-colors">→ logs</button>`
+        : ''}
+    </div>
+  `;
+  m.appendChild(wrap);
+  document.getElementById(`planConfirm-${plan.plan_id}`).onclick = () => pyBridge.confirmPlan(plan.plan_id);
+  document.getElementById(`planCancel-${plan.plan_id}`).onclick = () => {
+    pyBridge.cancelPlan(plan.plan_id);
+    wrap.style.opacity = '0.4';
+    wrap.style.pointerEvents = 'none';
+  };
+  scrollBottom();
+}
+
+function renderInjectResult(summary) {
+  collapseHero();
+  const m = document.getElementById('messages');
+  const added = summary.added || {};
+  const target = (summary.target || '').split(/[\\/]/).pop();
+  const renamed = summary.renamed || {};
+  const warnings = summary.warnings || [];
+
+  const wrap = el('div', 'msg-in w-full mt-2 border hair rounded-2xl bg-[var(--bg-panel)] overflow-hidden');
+  wrap.innerHTML = `
+    <div class="px-6 pt-5 pb-4 border-b hair">
+      <div class="mono mb-2 text-[10px] uppercase tracking-[0.24em] text-[var(--ok)]">Injection complete</div>
+      <h2 class="serif text-[28px] font-normal text-[var(--fg)] leading-tight">
+        Merged into <span class="mono text-[20px]">${esc(target)}</span>
+      </h2>
+    </div>
+    <div class="grid grid-cols-4 divide-x divide-[var(--border)]">
+      ${['components','wires','labels','junctions'].map(k => `
+        <div class="px-4 py-4">
+          <div class="mono text-[22px] text-[var(--fg)]">${added[k] || 0}</div>
+          <div class="mono text-[9.5px] uppercase tracking-[0.18em] text-[var(--fg-dim)] mt-1">${k}</div>
+        </div>`).join('')}
+    </div>
+    ${Object.keys(renamed).length ? `
+      <div class="px-6 py-3 border-t hair">
+        <div class="mono text-[10px] tracking-[0.18em] uppercase text-[var(--fg-mute)] mb-1">Renumbered</div>
+        <div class="mono text-[11.5px] text-[var(--fg)]">
+          ${Object.entries(renamed).map(([a,b]) => `<span class="mr-3">${esc(a)} → ${esc(b)}</span>`).join('')}
+        </div>
+      </div>` : ''}
+    ${warnings.length ? `
+      <div class="px-6 py-3 border-t hair border-l-2 border-l-[var(--warn)]">
+        ${warnings.map(w => `<div class="text-[11.5px] text-[var(--warn)]">⚠ ${esc(w)}</div>`).join('')}
+      </div>` : ''}
+    ${summary.backup ? `
+      <div class="px-6 py-3 border-t hair mono text-[10.5px] text-[var(--fg-dim)]">
+        Backup · <span class="text-[var(--fg-mute)]">${esc((summary.backup+'').split(/[\\\\/]/).pop())}</span>
+      </div>` : ''}
+    <div class="px-6 py-4 border-t hair">
+      <div class="mono text-[10px] tracking-[0.22em] uppercase text-[var(--fg-mute)] mb-1">Next</div>
+      <div class="text-[13px] text-[var(--fg)]">Reload in KiCad — Eeschema → File → Revert.</div>
+    </div>
+  `;
+  m.appendChild(wrap);
+  scrollBottom();
+}
+
+function renderInjectFailure(message) {
+  collapseHero();
+  const m = document.getElementById('messages');
+  const wrap = el('div', 'msg-in border hair rounded-2xl bg-[var(--bg-panel)] p-6 mt-2');
+  wrap.innerHTML = `
+    <div class="mono mb-2 text-[10px] uppercase tracking-[0.24em] text-[var(--bad)]">Injection failed</div>
+    <h2 class="serif text-[24px] font-normal text-[var(--fg)] leading-tight mb-3">Something <em class="italic text-[var(--bad)]">interrupted</em> the merge.</h2>
+    <div class="border-l-2 border-[var(--bad)] pl-3.5 py-2 mono text-[11.5px] text-[var(--fg-mute)] whitespace-pre-wrap">${esc(message)}</div>
+  `;
+  m.appendChild(wrap);
+  scrollBottom();
+}
+
+// ---------------------------------------------------------------------------
+// state
+// ---------------------------------------------------------------------------
+function setBusy(busy) {
+  const b = document.getElementById('busyLabel');
+  b.classList.toggle('hidden', !busy);
+  b.classList.toggle('flex', busy);
+  document.getElementById('sendBtn').disabled = busy;
+  document.getElementById('prompt').disabled = busy;
+  document.getElementById('sendIcon').classList.toggle('hidden', busy);
+  document.getElementById('sendSpin').classList.toggle('hidden', !busy);
+  if (busy) addThinking(); else removeThinking();
+}
+
+function setTargetChip(name) {
+  const chip = document.getElementById('targetChip');
+  const text = document.getElementById('targetChipText');
+  const clear = document.getElementById('clearTargetBtn');
+  if (name) {
+    chip.className = 'flex items-center gap-1.5 mono text-[11px] text-[var(--ok)] tracking-tight flex-1 truncate';
+    text.textContent = name;
+    clear.classList.remove('hidden');
+  } else {
+    chip.className = 'flex items-center gap-1.5 mono text-[11px] text-[var(--bad)] tracking-tight flex-1 truncate';
+    text.textContent = 'no target';
+    clear.classList.add('hidden');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// thinking indicator (inline in chat)
+// ---------------------------------------------------------------------------
+let thinkingRow = null;
+function addThinking() {
+  if (thinkingRow) return;
+  collapseHero();
+  const m = document.getElementById('messages');
+  thinkingRow = el('div', 'msg-in flex items-center gap-2.5 py-1');
+  thinkingRow.innerHTML = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" class="w-3.5 h-3.5 text-[var(--fg-mute)] animate-spin">
+      <path stroke-linecap="round" d="M10 3v3"/>
+      <path stroke-linecap="round" opacity="0.3" d="M10 14v3M3 10h3M14 10h3M4.7 4.7l2.1 2.1M13.2 13.2l2.1 2.1M4.7 15.3l2.1-2.1M13.2 6.8l2.1-2.1"/>
+    </svg>
+    <div class="text-[14px] text-[var(--fg-mute)] typing-caret">Reasoning through parts, nets, and geometry</div>
+  `;
+  m.appendChild(thinkingRow);
+  scrollBottom();
+}
+function removeThinking() {
+  if (thinkingRow) { thinkingRow.remove(); thinkingRow = null; }
+}
+
+// ---------------------------------------------------------------------------
+// logs modal
+// ---------------------------------------------------------------------------
+function showLogs(id) {
+  if (pendingLogs[id] !== undefined) return openLogsModal(pendingLogs[id]);
+  pyBridge.fetchLogs(id);
+  const t = setInterval(() => {
+    if (pendingLogs[id] !== undefined) { clearInterval(t); openLogsModal(pendingLogs[id]); }
+  }, 60);
+}
+function openLogsModal(text) {
+  const back = el('div', 'fixed inset-0 bg-black/70 flex items-center justify-center z-50 msg-in backdrop-blur-sm');
+  back.onclick = e => { if (e.target === back) back.remove(); };
+  const box = el('div', 'bg-[var(--bg-panel)] border hair rounded-2xl w-[80%] max-w-3xl max-h-[80vh] flex flex-col');
+  box.innerHTML = `
+    <div class="flex items-center justify-between px-5 py-3 border-b hair">
+      <div class="mono text-[10px] tracking-[0.18em] uppercase text-[var(--fg-mute)]">Engine log</div>
+      <button onclick="this.closest('.fixed').remove()"
+              class="w-6 h-6 flex items-center justify-center text-[var(--fg-dim)] hover:text-[var(--fg)] transition-colors">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" class="w-3 h-3">
+          <path stroke-linecap="round" d="M5 5l10 10M15 5L5 15"/>
+        </svg>
+      </button>
+    </div>
+    <pre class="flex-1 overflow-auto p-5 mono text-[11px] text-[var(--fg-mute)] whitespace-pre selectable">${esc(text || '(no output)')}</pre>
+  `;
+  back.appendChild(box);
+  document.body.appendChild(back);
+}
+</script>
+</body>
+</html>

@@ -55,7 +55,22 @@ HERE = Path(__file__).resolve().parent
 # Free-tier quota is counted per model per day (20 requests), so switching
 # models is the quickest way past a daily cap. As of the last test run
 # gemini-3.6-flash and gemini-3.7-flash were both spent; this one was not.
-MODEL_NAME = "gemini-3.5-flash"
+# Ranked best -> worst reasoning ability. Each has its own daily free-tier
+# quota (20 req/day), so we chain them: on 404/quota-exhausted, drop and
+# try the next. First success is cached in _working_model for the session.
+MODEL_CANDIDATES: List[str] = [
+    "gemini-2.5-pro",           # strongest reasoning, small quota
+    "gemini-3.8-flash",         # newest flash
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-latest",      # alias fallback
+]
+MODEL_NAME = MODEL_CANDIDATES[0]  # legacy alias; the actual pick comes from _choose_model()
+
+_failed_models: set = set()
+_working_model: Optional[str] = None
 BACKEND_URL = "http://127.0.0.1:8000/api/v1/generate"
 REQUEST_TIMEOUT_S = 120
 
@@ -387,45 +402,175 @@ def _readable_api_error(exc: Exception, model: Optional[str] = None) -> RuntimeE
     return RuntimeError(f"{name}: {first_line[:300]}")
 
 
+def _salvage_json(raw: str) -> Optional[Dict[str, Any]]:
+    """Try to parse malformed JSON Gemini occasionally returns.
+
+    Common failures: wrapped in ```json fences, trailing commas before ]/},
+    truncated at max_output_tokens. Returns None if none of the repairs work
+    -- caller rotates to a different model.
+    """
+    import re
+    s = raw.strip()
+    # Strip markdown code fences the model sometimes adds despite JSON mode.
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
+        s = re.sub(r"\s*```\s*$", "", s)
+    # Trailing commas before ] or }.
+    s = re.sub(r",\s*([\]}])", r"\1", s)
+    # First attempt on the cleaned string.
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    # Truncated payload -- try lopping off after the last balanced close.
+    depth = 0
+    last_ok = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(s):
+        if esc:
+            esc = False; continue
+        if ch == "\\" and in_str:
+            esc = True; continue
+        if ch == '"':
+            in_str = not in_str; continue
+        if in_str:
+            continue
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth == 0:
+                last_ok = i
+    if last_ok > 0:
+        try:
+            return json.loads(s[:last_ok + 1])
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _choose_model() -> str:
+    """First candidate that hasn't hit 404/quota in this session."""
+    global _working_model
+    forced = os.environ.get("TRACER_FORCED_MODEL", "").strip()
+    if forced and forced not in _failed_models:
+        return forced
+    if _working_model and _working_model not in _failed_models:
+        return _working_model
+    for m in MODEL_CANDIDATES:
+        if m not in _failed_models:
+            return m
+    raise RuntimeError(
+        "Every Gemini model in MODEL_CANDIDATES failed this session "
+        "(quota exhausted or unavailable). Restart to reset, or add a "
+        "new model name at the top of agent.py.")
+
+
+def _is_rotatable_error(exc: Exception) -> bool:
+    """Does this error mean 'try a different model'?"""
+    text = str(exc)
+    name = type(exc).__name__
+    if "429" in text or "ResourceExhausted" in name:
+        return True
+    if "quota" in text.lower() or "per day" in text.lower():
+        return True
+    if "404" in text and "model" in text.lower():
+        return True
+    return False
+
+
+_ASK_SYSTEM = (
+    "You are a KiCad and electronics assistant. Answer briefly and directly. "
+    "Do NOT emit JSON, circuit specs, or code fences unless the user explicitly asks. "
+    "This is Q&A — no artifacts, no injection, just plain-text answers."
+)
+
+
+def ask_gemini(prompt: str, history: List[Dict[str, str]]) -> str:
+    """Plain Q&A. No circuit output, no clarification handshake, no JSON.
+
+    Reuses the same key + model rotation as query_gemini, but with a system
+    prompt that suppresses the structured-output pipeline. Returns the model
+    reply as a plain string.
+    """
+    global _working_model
+    genai.configure(api_key=_api_key())
+    convo = list(history) + [{"role": "user", "text": prompt}]
+    last_error: Optional[Exception] = None
+    for _ in range(len(MODEL_CANDIDATES) + 1):
+        model_name = _choose_model()
+        try:
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=_ASK_SYSTEM,
+            )
+            resp = model.generate_content(_to_contents(convo))
+            _working_model = model_name
+            text = (getattr(resp, "text", None) or "").strip()
+            return text or "(no reply)"
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if _is_rotatable_error(exc):
+                _failed_models.add(model_name)
+                continue
+            raise _readable_api_error(exc, model_name) from exc
+    raise _readable_api_error(last_error or RuntimeError("all models failed"))
+
+
 def query_gemini(history: List[Dict[str, str]]) -> Dict[str, Any]:
     """Ask Gemini for a circuit block, or for a clarifying question.
 
     Takes the whole conversation so far, so an answer to a follow-up is read in
-    the context of the original request.
+    the context of the original request. Rotates through MODEL_CANDIDATES on
+    quota / 404 failures so the whole free tier's daily budget is available.
     """
+    global _working_model
     genai.configure(api_key=_api_key())
-    model = genai.GenerativeModel(
-        model_name=MODEL_NAME,
-        system_instruction=SYSTEM_INSTRUCTION,
-        generation_config={
-            # The whole point of this call: JSON out, never prose.
-            "response_mime_type": "application/json",
-            "temperature": 0.2,
-            "max_output_tokens": 8192,
-        },
-    )
 
-    try:
-        response = model.generate_content(_to_contents(history))
-    except Exception as exc:  # noqa: BLE001 -- re-raised, just more legibly
-        raise _readable_api_error(exc, MODEL_NAME) from exc
+    last_error: Optional[Exception] = None
+    while True:
+        model_name = _choose_model()
+        model = genai.GenerativeModel(
+            model_name=model_name,
+            system_instruction=SYSTEM_INSTRUCTION,
+            generation_config={
+                "response_mime_type": "application/json",
+                "temperature": 0.2,
+                "max_output_tokens": 8192,
+            },
+        )
+        try:
+            response = model.generate_content(_to_contents(history))
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if _is_rotatable_error(exc):
+                _failed_models.add(model_name)
+                if _working_model == model_name:
+                    _working_model = None
+                continue  # try next candidate
+            raise _readable_api_error(exc, model_name) from exc
 
-    raw = (response.text or "").strip()
-    if not raw:
-        finish = "unknown"
-        if response.candidates:
-            finish = getattr(response.candidates[0], "finish_reason", "unknown")
-        raise RuntimeError(f"Gemini returned nothing. Finish reason: {finish}")
+        raw = (response.text or "").strip()
+        if not raw:
+            # Empty response -- treat as rotatable; another model may work.
+            _failed_models.add(model_name)
+            continue
 
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"Gemini did not return valid JSON ({exc}).\n"
-            f"--- raw response ---\n{raw[:2000]}"
-        ) from exc
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            # Try a permissive salvage first (trailing commas, unquoted
+            # keys, code-fence wrapping). If that also fails, rotate.
+            payload = _salvage_json(raw)
+            if payload is None:
+                _failed_models.add(model_name)
+                if _working_model == model_name:
+                    _working_model = None
+                continue
 
-    return _unwrap(payload)
+        _working_model = model_name
+        return _unwrap(payload)
 
 
 def _unwrap(payload: Any) -> Dict[str, Any]:
@@ -457,12 +602,270 @@ def _unwrap(payload: Any) -> Dict[str, Any]:
     return {"status": "success", "circuit": _normalise_circuit(circuit)}
 
 
-def _normalise_circuit(circuit: Dict[str, Any]) -> Dict[str, Any]:
+# --- symbol validation -------------------------------------------------------
+#
+# Gemini invents library and symbol names that don't exist in KiCad. Every
+# rejection burns a repair round-trip. Cheaper: check the invented symbol
+# against the *actual* installed library table and swap for a generic
+# fallback when we can. Uses kicad_sch_api's global symbol cache -- one-time
+# library discovery (~2s), then O(1) lookups against a set.
+
+_ALL_SYMBOLS: Optional[set] = None
+_SYMBOLS_BY_LIB: Dict[str, List[str]] = {}
+
+
+def _discover_all_symbols() -> set:
+    """Scan every installed .kicad_sym file once, build a flat set of
+    Library:SymbolName strings. Direct file scan sidesteps the kicad_sch_api
+    cache's lazy-load semantics (which broke search across cold libraries).
+    """
+    global _ALL_SYMBOLS, _SYMBOLS_BY_LIB
+    if _ALL_SYMBOLS is not None:
+        return _ALL_SYMBOLS
+
+    import re
+    from pathlib import Path
+
+    # KiCad ships symbols under <install>/share/kicad/symbols; the user may
+    # also have libs under %APPDATA%/kicad/*.kicad_sym. Discover both.
+    search_paths: List[Path] = []
+    for env_key in ("KICAD10_SYMBOL_DIR", "KICAD9_SYMBOL_DIR", "KICAD8_SYMBOL_DIR"):
+        p = os.environ.get(env_key)
+        if p:
+            search_paths.append(Path(p))
+    # Common Windows install location.
+    search_paths.append(Path(r"C:\Program Files\KiCad\10.0\share\kicad\symbols"))
+    search_paths.append(Path(r"C:\Program Files\KiCad\9.0\share\kicad\symbols"))
+    search_paths.append(Path.home() / "Documents" / "KiCad" / "10.0" / "symbols")
+    # De-dupe and keep the first that actually contains .kicad_sym files.
+    seen: set = set()
+    good: List[Path] = []
+    for p in search_paths:
+        if p in seen or not p.is_dir():
+            continue
+        seen.add(p)
+        if any(p.glob("*.kicad_sym")):
+            good.append(p)
+
+    all_symbols: set = set()
+    pat = re.compile(r'\(symbol\s+"([^"]+)"')
+    for base in good:
+        for lib_file in base.glob("*.kicad_sym"):
+            lib_name = lib_file.stem
+            try:
+                text = lib_file.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            names: List[str] = []
+            for m in pat.finditer(text):
+                name = m.group(1)
+                # Skip child-part variants (SymbolName_1_1, _0_1) - not directly usable
+                if re.search(r"_\d+_\d+$", name):
+                    continue
+                names.append(name)
+                all_symbols.add(f"{lib_name}:{name}")
+            _SYMBOLS_BY_LIB[lib_name] = names
+
+    _ALL_SYMBOLS = all_symbols
+    return all_symbols
+
+
+def _symbol_exists(lib_id: str) -> bool:
+    """True iff Library:SymbolName resolves to an installed KiCad symbol."""
+    syms = _discover_all_symbols()
+    if not syms:
+        return True  # nothing to validate against -> let the backend decide
+    return lib_id in syms
+
+
+def _search_symbol_by_name(query: str, library: Optional[str] = None) -> Optional[str]:
+    """Substring-match against the flat symbol set. Returns the shortest hit
+    (usually the base variant, not a suffixed one)."""
+    if not query:
+        return None
+    _discover_all_symbols()
+    query_l = query.lower()
+    hits: List[str] = []
+    if library and library in _SYMBOLS_BY_LIB:
+        pool = [(library, n) for n in _SYMBOLS_BY_LIB[library]]
+    else:
+        pool = [(lib, n) for lib, names in _SYMBOLS_BY_LIB.items() for n in names]
+    for lib, name in pool:
+        if query_l in name.lower():
+            hits.append(f"{lib}:{name}")
+    if not hits:
+        return None
+    return min(hits, key=len)
+
+
+# ref-prefix -> deterministic fallback. Only used when we're highly confident
+# what the user meant (a two-letter passive family), not for ICs.
+_REF_FALLBACK = {
+    "R": "Device:R",
+    "C": "Device:C",
+    "L": "Device:L",
+    "D": "Device:D",
+    "LED": "Device:LED",
+    "Q": "Device:Q_NPN_BEC",
+    "Y": "Device:Crystal",
+    "FB": "Device:Ferrite_Bead",
+    "TP": "Connector:TestPoint",
+    "SW": "Switch:SW_Push",
+}
+
+
+def _ref_prefix(ref: str) -> str:
+    """'R12' -> 'R'; 'LED3' -> 'LED'; 'U1' -> 'U'."""
+    i = 0
+    while i < len(ref) and not ref[i].isdigit():
+        i += 1
+    return ref[:i] or ref
+
+
+def _connector_fallback(ref: str, nets: List[Dict[str, Any]]) -> str:
+    """Pick Conn_01xN sized to however many pins nets actually reference."""
+    pins = {c["pin"] for net in nets for c in net.get("connections") or []
+            if c.get("ref") == ref}
+    n = max(2, min(len(pins) or 2, 10))
+    return f"Connector_Generic:Conn_01x{n:02d}"
+
+
+def _ic_fallback(sym: str, value: str) -> Optional[str]:
+    """For an IC (U-ref) with a bad symbol, try to find a real match.
+
+    Strategy: peel the suffix off the invented symbol name (`CP2102-GM` ->
+    `CP2102`, `ATmega328P-PU` -> `ATmega328P`), search within the claimed
+    library first (invented `Interface_USB:CP2102-GM` will match the real
+    `Interface_USB:CP2102N-Axx-xQFN28`), then fall back to a global search
+    against the base name or the value field.
+    """
+    import re
+    if not sym:
+        return None
+    lib, _, name = sym.partition(":")
+    if not name:
+        name = sym
+    # Peel dash/underscore suffix down to a stable base name.
+    candidates = [name]
+    for cut in ("-", "_"):
+        stem = name.split(cut, 1)[0]
+        if stem and stem != name:
+            candidates.append(stem)
+    # Also try the value string (often the actual part number).
+    if value:
+        candidates.append(value)
+        for cut in ("-", "_"):
+            stem = value.split(cut, 1)[0]
+            if stem and stem != value:
+                candidates.append(stem)
+    # Search claimed library first, then everywhere.
+    for query in candidates:
+        hit = _search_symbol_by_name(query, library=lib)
+        if hit:
+            return hit
+    for query in candidates:
+        hit = _search_symbol_by_name(query)
+        if hit:
+            return hit
+    return None
+
+
+# Value-authoritative overrides for common ICs Gemini gets structurally wrong.
+# When the "value" clearly names one chip family and the symbol names another
+# (e.g. value "ESP32-WROOM-32" with symbol "MCU_Espressif:ESP32-C3"), the
+# value wins -- Gemini's naming is more reliable than its library recall.
+_VALUE_CANONICAL_MAP = [
+    # (substring in value, canonical symbol)
+    ("ESP32-WROOM-32", "RF_Module:ESP32-WROOM-32"),
+    ("ESP32-WROOM-32U", "RF_Module:ESP32-WROOM-32U"),
+    ("ESP32-WROOM-32E", "RF_Module:ESP32-WROOM-32E"),
+    ("ESP32-S3-WROOM", "RF_Module:ESP32-S3-WROOM-1"),
+    ("ESP32-C3-MINI", "RF_Module:ESP32-C3-MINI-1"),
+    ("ATmega328P-PU", "MCU_Microchip_ATmega:ATmega328P-PU"),
+    ("ATtiny85-20P", "MCU_Microchip_ATtiny:ATtiny85-20P"),
+    ("AMS1117-3.3", "Regulator_Linear:AMS1117-3.3"),
+    ("AMS1117-5.0", "Regulator_Linear:AMS1117-5.0"),
+    ("LM7805", "Regulator_Linear:LM7805_TO220"),
+    ("NE555", "Timer:NE555P"),
+    ("LM358", "Amplifier_Operational:LM358"),
+    ("TL072", "Amplifier_Operational:TL072"),
+    ("CP2102N", "Interface_USB:CP2102N-Axx-xQFN28"),
+    ("CP2102",  "Interface_USB:CP2102C-Axx-xQFN24"),
+    ("CH340C",  "Interface_USB:CH340C"),
+    ("FT232RL", "Interface_USB:FT232RL"),
+]
+
+
+def _canonical_for_value(value: str) -> Optional[str]:
+    """If `value` names a chip family we have a known-good symbol for,
+    return that symbol. Match against the longest key first so
+    'ESP32-WROOM-32U' wins over 'ESP32-WROOM-32'."""
+    if not value:
+        return None
+    v_upper = value.upper()
+    matches = [(k, v) for k, v in _VALUE_CANONICAL_MAP if k.upper() in v_upper]
+    if not matches:
+        return None
+    # Longest key first so more-specific families win.
+    matches.sort(key=lambda kv: -len(kv[0]))
+    for _, canonical in matches:
+        if _symbol_exists(canonical):
+            return canonical
+    return None
+
+
+def _validate_and_swap_symbols(
+    circuit: Dict[str, Any], log: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Replace invented or wrong symbols with real ones in place. Value string
+    is authoritative for known IC families; otherwise fall back to ref-prefix
+    heuristics or library-index search."""
+    log = log or _log_noop
+    if not _discover_all_symbols():
+        return
+    nets = circuit.get("nets") or []
+    for comp in circuit.get("components") or []:
+        sym = comp.get("symbol", "")
+        value = comp.get("value", "")
+        # 1. Value wins over symbol for known chip families. Catches cases
+        #    like value="ESP32-WROOM-32" with symbol="MCU_Espressif:ESP32-C3".
+        canonical = _canonical_for_value(value)
+        if canonical and canonical != sym:
+            log(f"[preflight] value-swap {comp.get('ref', '?')}: {sym!r} -> {canonical} (value: {value!r})")
+            comp["symbol"] = canonical
+            continue
+        # 2. Everything below only runs if the current symbol is invalid.
+        if not sym or _symbol_exists(sym):
+            continue
+        ref = comp.get("ref", "")
+        prefix = _ref_prefix(ref)
+        new: Optional[str] = None
+        # 1. Passive family fallback: R/C/L/D/LED/Q/Y/FB/TP/SW
+        if prefix in _REF_FALLBACK:
+            new = _REF_FALLBACK[prefix]
+            if prefix == "D" and "LED" in (comp.get("value") or "").upper():
+                new = "Device:LED"
+        # 2. Connector: pick Conn_01xN sized to net references
+        elif prefix == "J":
+            new = _connector_fallback(ref, nets)
+        # 3. IC: peel-and-search against the actual library table
+        else:
+            new = _ic_fallback(sym, comp.get("value", ""))
+        if new and _symbol_exists(new):
+            log(f"[preflight] swapped {ref}: {sym} -> {new}")
+            comp["symbol"] = new
+        # else: leave it; the LLM repair loop takes over
+
+
+def _normalise_circuit(
+    circuit: Dict[str, Any], log: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
     """Nudge the block into the exact shape the backend expects.
 
     Two things go wrong often enough to be worth fixing here rather than
     spending a round trip on a 422: pin numbers arrive as ints, and optional
-    fields arrive as explicit nulls.
+    fields arrive as explicit nulls. On top of that, swap any symbol that
+    isn't in the installed KiCad library table for a real fallback.
     """
     for net in circuit.get("nets") or []:
         for conn in net.get("connections") or []:
@@ -474,7 +877,13 @@ def _normalise_circuit(circuit: Dict[str, Any]) -> Dict[str, Any]:
         for key in ("footprint", "rotation", "role", "value"):
             if comp.get(key) is None:
                 comp.pop(key, None)
+        # The backend accepts exactly one role value: "controller". Gemini
+        # occasionally invents adjacent labels like "connector" or "regulator";
+        # drop those rather than 422 the whole build over an optional hint.
+        if comp.get("role") not in (None, "controller"):
+            comp.pop("role", None)
 
+    _validate_and_swap_symbols(circuit, log)
     return circuit
 
 
@@ -594,8 +1003,10 @@ def build_circuit(
     for line in textwrap.wrap(prompt, 66):
         log(f"  {line}")
 
-    log(f"\nAsking {MODEL_NAME} ...")
+    log(f"\nAsking {_choose_model()} ...")
     result = query_gemini(history)
+    if _working_model:
+        log(f"  (answered by {_working_model})")
 
     if result["status"] == "clarification_needed":
         question = result["question"]
@@ -641,38 +1052,222 @@ def build_circuit(
     return out
 
 
-def repair_prompt(result: Dict[str, Any]) -> str:
-    """Turn an engine rejection into an instruction Gemini can act on.
+_REPAIR_GUIDANCE = {
+    "symbol-lookup": """\
+The named symbol is NOT in the installed KiCad libraries. Return a corrected
+circuit that:
+  1. Replaces the offending symbol with a real, standard one. When unsure,
+     fall back to the generic Device: or Connector_Generic: equivalent
+     (Device:R, Device:C, Device:LED, Device:D, Connector_Generic:Conn_01x02,
+     Connector_Generic:Conn_01x04) and put the specific part number in the
+     "value" field.
+  2. For USB-C receptacles use 'Connector:USB_C_Receptacle_USB2.0_16P' (16-pin
+     USB 2.0 flavour) or the generic 'Connector_Generic:Conn_01x06'. Do NOT
+     invent 'USB_C_Reversible'.
+  3. For serial bridges the real symbol is 'Interface_USB:CP2102N-Axx-xQFN28'
+     (lowercase 'x' in the suffix -- KiCad's placeholder for any variant).
+     Alternatives: 'Interface_USB:CP2102C-Axx-xQFN24', 'Interface_USB:CP2104',
+     'Interface_USB:CH340C', 'Interface_USB:FT232RL'. If unsure, fall back
+     to a Connector_Generic 4-pin header and note the chip in "value".
+  4. Do NOT invent library or symbol names. Keep every other component and
+     net unchanged.""",
 
-    The layout engine's complaints are specific and mechanical -- which net
-    could not be routed, which pin was in the way -- so handing the text back
-    verbatim is more useful than paraphrasing it.
+    "pin-lookup": """\
+A net references a pin that does not exist on the named symbol. Return a
+corrected circuit that:
+  1. Removes the invented pin connection or moves it to a real pin number
+     of that symbol -- pin numbers are the part's own, not sequential.
+  2. If the symbol is a large IC and you are unsure of the pinout, drop the
+     connection entirely rather than guess. A missing net is better than a
+     wrong one.
+  3. Keep every other component and net unchanged.""",
 
-    The list is deliberately concrete. A bare "give the parts more room" let the
-    model resend a near-identical layout, so the repair round burned a turn and
-    failed on the same obstacle; naming the two spacing knobs and the polarity
-    trap gives it something it can actually change.
-    """
-    template = """\
-The layout engine rejected that circuit at the '{stage}' stage:
+    "request-validation": """\
+The JSON did not match the strict backend schema. Return a corrected circuit
+that:
+  1. Removes any field the schema does not allow. The only valid role value
+     is "controller"; do NOT invent "connector", "regulator", "sensor" etc.
+  2. Uses the exact key names and value types from the system instructions.
+  3. Keeps every component and net you had, minus the invalid fields.""",
 
-{detail}
-
-Return the corrected circuit as a full "success" payload. Keep the same
-components and the same nets -- change only the layout. Do not resend the
-layout you just sent; change at least two of these:
-  1. raise layout.channel_mm and layout.body_margin_mm (try 20.32 and 5.08,
+    "verification-routing": """\
+The layout engine could not find a clear routing path. Return a corrected
+circuit that:
+  1. Raises layout.channel_mm and layout.body_margin_mm (try 20.32 and 5.08,
      then 25.4 and 7.62);
-  2. move the blocking part to a different row, or spread that column's parts
-     over more rows;
-  3. rotate a part so its pins face the signal flow;
-  4. if the failing net names a two-pin part, check its polarity -- on
-     Device:LED and Device:D pin 1 is the cathode and pin 2 the anode, and a
-     net on the wrong pin makes the part face backwards.
-Do not ask a question; fix the geometry."""
-    return template.format(
-        stage=result.get("error_stage") or "verification",
-        detail=result.get("error_detail") or "no detail given")
+  2. Moves the blocking part to a different row, or spreads that column's
+     parts over more rows;
+  3. Rotates a part so its pins face the signal flow;
+  4. If the failing net names a two-pin part, checks its polarity -- on
+     Device:LED and Device:D pin 1 is the cathode and pin 2 the anode.""",
+
+    "verification-offsheet": """\
+Components or labels ran OFF the sheet's edge. The block is bigger than the
+sheet, so making it roomier will only make it worse. Return a corrected
+circuit that:
+  1. Escalates the sheet size: change "sheet" from "A4" (297x210 mm) to "A3"
+     (420x297 mm), or from "A3" to "A2" (594x420 mm). Use "A2" for anything
+     over ~12 components with several columns of decoupling caps.
+  2. LOWERS layout.channel_mm and layout.body_margin_mm back to defaults
+     (channel_mm 15.24, body_margin_mm 3.81) -- overspacing was making the
+     block spill off the sheet. Do NOT raise them.
+  3. Keeps every component and net you had; only "sheet" and layout
+     spacing may change.""",
+
+    "layout": """\
+The layout engine rejected the geometry. Raise layout.channel_mm and
+layout.body_margin_mm modestly, spread crowded columns, rotate parts to
+align with signal flow, and check two-pin polarity.""",
+}
+
+
+def _classify_verification(detail: str) -> str:
+    """Look at the engine's verification detail; pick the right recipe."""
+    low = (detail or "").lower()
+    if "off the" in low and "sheet" in low:
+        return "verification-offsheet"
+    return "verification-routing"
+
+
+def repair_prompt(result: Dict[str, Any]) -> str:
+    """Turn an engine rejection into a stage-aware instruction Gemini can act on.
+
+    Each backend failure stage (symbol-lookup, pin-lookup, request-validation,
+    verification, layout) has its own concrete repair recipe -- a generic
+    "fix it" prompt burns a turn on a near-identical retry, whereas a
+    stage-specific one names the exact knob to change. Verification splits
+    further: "no clear path" wants more spacing, "off the sheet" wants a
+    bigger sheet and less spacing -- opposite fixes for opposite failures.
+    """
+    stage = result.get("error_stage") or "verification"
+    detail = result.get("error_detail") or "no detail given"
+
+    guidance_key = stage
+    if stage == "verification":
+        guidance_key = _classify_verification(detail)
+
+    guidance = _REPAIR_GUIDANCE.get(guidance_key, _REPAIR_GUIDANCE["layout"])
+    return (
+        f"The backend rejected that circuit at the '{stage}' stage:\n\n"
+        f"{detail}\n\n"
+        f"{guidance}\n\n"
+        f"Do not ask a question; return a full \"success\" payload with the fix."
+    )
+
+
+_SHEET_ESCALATION = {"A4": "A3", "A3": "A2", "A": "A2", "B": "A2"}
+_DEFAULT_LAYOUT_RESET = {
+    "channel_mm": 15.24,
+    "body_margin_mm": 3.81,
+    "rail_drop_mm": 12.7,
+}
+
+
+def try_mechanical_repair(
+    circuit: Dict[str, Any], result: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Repair a rejection deterministically, without another Gemini call.
+
+    Some failure modes have a mechanical fix that doesn't need any judgement --
+    e.g. an off-the-sheet failure just needs a bigger sheet size. Doing that
+    in Python is faster, cheaper, and more reliable than asking Gemini to
+    re-emit the whole circuit.
+
+    Returns a patched circuit dict on success, or None if no local fix
+    applies and we should fall through to the LLM-based repair.
+    """
+    stage = result.get("error_stage") or ""
+    detail = (result.get("error_detail") or "").lower()
+
+    if stage == "verification" and "off the" in detail and "sheet" in detail:
+        current = circuit.get("sheet", "A4")
+        nxt = _SHEET_ESCALATION.get(current)
+        if nxt and nxt != current:
+            patched = json.loads(json.dumps(circuit))  # deep copy
+            patched["sheet"] = nxt
+            # Reset spacing -- a previous retry may have raised it, which
+            # only made the off-sheet problem worse.
+            patched.setdefault("layout", {})
+            patched["layout"].update(_DEFAULT_LAYOUT_RESET)
+            return patched
+
+    return None
+
+
+def build_with_auto_repair(
+    prompt: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    log: Optional[Callable[[str], None]] = None,
+    max_repairs: int = MAX_REPAIRS,
+) -> Dict[str, Any]:
+    """Like build_circuit, but retries on backend_rejected using repair_prompt.
+
+    Clarification requests propagate up unchanged (the caller answers them).
+    A backend rejection is fed back to Gemini as a stage-specific repair
+    instruction, up to `max_repairs` times before giving up.
+    """
+    log = log or _log_noop
+    history = list(history or [])
+    turn = prompt
+    result: Dict[str, Any] = {}
+    for attempt in range(max_repairs + 1):
+        result = build_circuit(turn, history, post=True, log=log)
+        history = result.get("history", history)
+
+        if result.get("status") != "backend_rejected":
+            return result
+
+        # Try to fix it locally without burning a Gemini turn. Loops until
+        # the mechanical fix stops making progress (or the backend accepts).
+        circuit = result.get("circuit")
+        mech_rounds = 0
+        while circuit is not None and mech_rounds < 3:
+            patched = try_mechanical_repair(circuit, result)
+            if patched is None:
+                break
+            mech_rounds += 1
+            log(f"\n[auto-repair] mechanical fix: sheet -> "
+                f"{patched.get('sheet')}, layout reset.")
+            posted = post_to_backend(patched, log=log)
+            if posted["ok"]:
+                # Success path -- backend accepted the patched circuit.
+                history.append({"role": "model",
+                                "text": json.dumps({"status": "success",
+                                                    "circuit": patched})})
+                return {
+                    "status": "success",
+                    "circuit": patched,
+                    "backend": posted["body"],
+                    "erc": posted["body"].get("erc") or {},
+                    "history": history,
+                    "_repair_count": attempt,
+                    "_mechanical_repairs": mech_rounds,
+                }
+            # backend still rejects -- update result and either loop again
+            # (if next mechanical step exists) or fall through to Gemini.
+            body = posted["body"]
+            result = {
+                "status": "backend_rejected",
+                "circuit": patched,
+                "backend": body,
+                "error_stage": body.get("stage", ""),
+                "error_detail": body.get("detail", ""),
+                "history": history,
+                "_repair_count": attempt,
+            }
+            circuit = patched
+
+        if attempt >= max_repairs:
+            log(f"\n[auto-repair] gave up after {attempt + 1} attempt(s); "
+                f"last stage was '{result.get('error_stage', '?')}'.")
+            return result
+
+        log(f"\n[auto-repair] backend rejected at "
+            f"'{result.get('error_stage', '?')}' -- asking Gemini to fix "
+            f"(attempt {attempt + 2}/{max_repairs + 1}).")
+        turn = repair_prompt(result)
+        result["_repair_count"] = attempt + 1
+    return result
 
 
 def run_conversation(
