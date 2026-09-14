@@ -103,7 +103,7 @@ The dropdown in the dock has four modes:
 |---|---|
 | **Agent** | Full generate → backend build → auto-inject if ERC clean and Auto ERC/DRC is on |
 | **Ask** | Plain Q&A. No circuit generation, no injection. Just a text reply. |
-| **Plan** | Full generate + backend build (so you see all Changes) but never auto-injects. Always shows Keep/Discard. |
+| **Plan** | Design conversation. LLM outputs a components/nets/notes outline as text — no backend build, no schematic gen, no inject. Switch to Agent to actually build the plan you agreed on. |
 | **Debug** | Same as Agent, plus verbose Activity lines (mode/target/model dump, per-component ref/symbol/footprint) |
 
 ---

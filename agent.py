@@ -343,12 +343,40 @@ on every LED. Give every component a sensible "value".
 # boundary as JSON and hand it straight back on the next turn.
 
 
-def _to_contents(history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-    """Turn portable history into the SDK's `contents` list."""
-    contents = []
+def _to_contents(
+    history: List[Dict[str, str]],
+    attachments: Optional[List[Dict[str, str]]] = None,
+) -> List[Any]:
+    """Turn portable history into the SDK's `contents` list.
+
+    When `attachments` is present, PIL.Image parts are appended to the LAST
+    user turn's parts list. The old google.generativeai SDK accepts a
+    mixed list of dicts and PIL.Image objects in a Content's parts.
+    """
+    contents: List[Any] = []
     for turn in history:
         role = "model" if turn.get("role") == "model" else "user"
         contents.append({"role": role, "parts": [{"text": turn.get("text", "")}]})
+    if attachments and contents and contents[-1]["role"] == "user":
+        try:
+            from PIL import Image  # noqa: WPS433 — deferred; Pillow is a Gemini dep
+        except ImportError:
+            return contents
+        for att in attachments:
+            path = att.get("path")
+            if not path:
+                continue
+            try:
+                img = Image.open(path)
+                img.load()  # eager decode so file handle can close
+                # Cap dimensions — cost + latency scale with pixels.
+                img.thumbnail((1024, 1024))
+                contents[-1]["parts"].append(img)
+            except Exception:
+                # Best-effort: silently skip a bad attachment. Sidecar
+                # already surfaced the file name in Activity so the user
+                # can see something's off if the reply seems oblivious.
+                pass
     return contents
 
 
@@ -486,13 +514,28 @@ _ASK_SYSTEM = (
     "This is Q&A — no artifacts, no injection, just plain-text answers."
 )
 
+_PLAN_SYSTEM = (
+    "You are a KiCad copilot in PLAN mode. The user is describing a circuit "
+    "they want. Your job: outline what you WOULD build, without building it.\n\n"
+    "Reply with a short design outline:\n"
+    "- **Components** (as a bullet list): each with a reference (R1, U1…), "
+    "value or part, and a one-line justification.\n"
+    "- **Nets** (bullet list): each with a name and which pins connect.\n"
+    "- **Notes** (optional): part-selection tradeoffs, footprints, power "
+    "budget, anything the user should decide before you generate.\n\n"
+    "Do NOT emit JSON. Do NOT emit KiCad symbol IDs. This is a design "
+    "conversation — the user reviews the plan and switches to Agent mode "
+    "when ready to actually generate the schematic."
+)
 
-def ask_gemini(prompt: str, history: List[Dict[str, str]]) -> str:
-    """Plain Q&A. No circuit output, no clarification handshake, no JSON.
 
-    Reuses the same key + model rotation as query_gemini, but with a system
-    prompt that suppresses the structured-output pipeline. Returns the model
-    reply as a plain string.
+def _chat_gemini(
+    prompt: str, history: List[Dict[str, str]], system_instruction: str,
+    attachments: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    """Shared plain-text chat path with model rotation. No JSON, no
+    clarification handshake — the caller supplies the system prompt that
+    shapes the response style (Q&A, plan outline, etc.).
     """
     global _working_model
     genai.configure(api_key=_api_key())
@@ -503,9 +546,9 @@ def ask_gemini(prompt: str, history: List[Dict[str, str]]) -> str:
         try:
             model = genai.GenerativeModel(
                 model_name=model_name,
-                system_instruction=_ASK_SYSTEM,
+                system_instruction=system_instruction,
             )
-            resp = model.generate_content(_to_contents(convo))
+            resp = model.generate_content(_to_contents(convo, attachments))
             _working_model = model_name
             text = (getattr(resp, "text", None) or "").strip()
             return text or "(no reply)"
@@ -518,7 +561,20 @@ def ask_gemini(prompt: str, history: List[Dict[str, str]]) -> str:
     raise _readable_api_error(last_error or RuntimeError("all models failed"))
 
 
-def query_gemini(history: List[Dict[str, str]]) -> Dict[str, Any]:
+def ask_gemini(prompt: str, history: List[Dict[str, str]],
+               attachments: Optional[List[Dict[str, str]]] = None) -> str:
+    """Plain Q&A. No circuit output, no clarification handshake, no JSON."""
+    return _chat_gemini(prompt, history, _ASK_SYSTEM, attachments)
+
+
+def plan_gemini(prompt: str, history: List[Dict[str, str]],
+                attachments: Optional[List[Dict[str, str]]] = None) -> str:
+    """PLAN mode: describe what would be built without building it."""
+    return _chat_gemini(prompt, history, _PLAN_SYSTEM, attachments)
+
+
+def query_gemini(history: List[Dict[str, str]],
+                 attachments: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     """Ask Gemini for a circuit block, or for a clarifying question.
 
     Takes the whole conversation so far, so an answer to a follow-up is read in
@@ -541,7 +597,7 @@ def query_gemini(history: List[Dict[str, str]]) -> Dict[str, Any]:
             },
         )
         try:
-            response = model.generate_content(_to_contents(history))
+            response = model.generate_content(_to_contents(history, attachments))
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             if _is_rotatable_error(exc):
@@ -980,6 +1036,7 @@ def build_circuit(
     history: Optional[List[Dict[str, str]]] = None,
     post: bool = True,
     log: Optional[Callable[[str], None]] = print,
+    attachments: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """One conversational turn: prompt -> Gemini -> (question | Tracer backend).
 
@@ -1004,7 +1061,7 @@ def build_circuit(
         log(f"  {line}")
 
     log(f"\nAsking {_choose_model()} ...")
-    result = query_gemini(history)
+    result = query_gemini(history, attachments=attachments)
     if _working_model:
         log(f"  (answered by {_working_model})")
 
@@ -1199,6 +1256,7 @@ def build_with_auto_repair(
     history: Optional[List[Dict[str, str]]] = None,
     log: Optional[Callable[[str], None]] = None,
     max_repairs: int = MAX_REPAIRS,
+    attachments: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Like build_circuit, but retries on backend_rejected using repair_prompt.
 
@@ -1211,7 +1269,11 @@ def build_with_auto_repair(
     turn = prompt
     result: Dict[str, Any] = {}
     for attempt in range(max_repairs + 1):
-        result = build_circuit(turn, history, post=True, log=log)
+        # Attachments only ride the first turn — repair turns are pure
+        # text prompts about backend errors.
+        first_turn_atts = attachments if attempt == 0 else None
+        result = build_circuit(turn, history, post=True, log=log,
+                               attachments=first_turn_atts)
         history = result.get("history", history)
 
         if result.get("status") != "backend_rejected":

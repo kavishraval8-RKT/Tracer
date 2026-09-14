@@ -37,7 +37,7 @@ import uvicorn
 from PySide6.QtCore import (
     QEvent, QObject, QPoint, QRect, QSize, Qt, QThread, QTimer, QUrl, Signal, Slot,
 )
-from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtGui import QColor, QGuiApplication, QRegion
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QMainWindow,
 )
@@ -122,10 +122,12 @@ class GenerateWorker(QObject):
     failed = Signal(str)
     log_line = Signal(str)
 
-    def __init__(self, prompt: str, history: List[Dict[str, str]]) -> None:
+    def __init__(self, prompt: str, history: List[Dict[str, str]],
+                 attachments: Optional[List[Dict[str, str]]] = None) -> None:
         super().__init__()
         self._prompt = prompt
         self._history = history
+        self._attachments = attachments or []
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -138,7 +140,8 @@ class GenerateWorker(QObject):
                 if not self._cancelled:
                     self.log_line.emit(line)
             result = agent.build_with_auto_repair(
-                self._prompt, history=self._history, log=log)
+                self._prompt, history=self._history, log=log,
+                attachments=self._attachments)
             if self._cancelled:
                 self.failed.emit("cancelled")
                 return
@@ -148,19 +151,27 @@ class GenerateWorker(QObject):
 
 
 class AskWorker(QObject):
-    """Ask-mode: plain Q&A. No circuit gen, no injection."""
+    """Ask (Q&A) or Plan (design outline): plain-text LLM turn, no circuit
+    gen, no backend, no injection. The mode-specific system prompt lives in
+    agent.py's ask_gemini / plan_gemini wrappers."""
     finished = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, prompt: str, history: List[Dict[str, str]]) -> None:
+    def __init__(self, prompt: str, history: List[Dict[str, str]],
+                 kind: str = "ask",
+                 attachments: Optional[List[Dict[str, str]]] = None) -> None:
         super().__init__()
         self._prompt = prompt
         self._history = history
+        self._kind = kind
+        self._attachments = attachments or []
 
     @Slot()
     def run(self) -> None:
         try:
-            reply = agent.ask_gemini(self._prompt, self._history)
+            fn = agent.plan_gemini if self._kind == "plan" else agent.ask_gemini
+            reply = fn(self._prompt, self._history,
+                       attachments=self._attachments)
             self.finished.emit(reply)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(f"{type(exc).__name__}: {exc}")
@@ -629,6 +640,8 @@ class PyBridge(QObject):
     modelsAvailable = Signal("QVariant", str)
     dockInit = Signal("QVariant")
     showUndoModal = Signal("QVariant")   # -> chat panel
+    clarificationChanged = Signal(bool)  # -> dock (freezes mode dropdown)
+    attachmentsChanged = Signal("QVariant")   # -> dock (chip list)
 
     def __init__(self, shell: "OverlayShell") -> None:
         super().__init__()
@@ -675,9 +688,16 @@ class PyBridge(QObject):
         self._shell.cancel_current()
 
     @Slot()
-    def attach(self) -> None:
-        # placeholder for future file attachment
-        pass
+    def pickAttachmentFile(self) -> None:
+        self._shell.pick_attachment_file()
+
+    @Slot()
+    def captureKicadScreenshot(self) -> None:
+        self._shell.capture_kicad_screenshot()
+
+    @Slot(int)
+    def removeAttachment(self, index: int) -> None:
+        self._shell.remove_attachment(index)
 
     @Slot(str)
     def setMode(self, mode: str) -> None:
@@ -690,6 +710,18 @@ class PyBridge(QObject):
     @Slot(bool)
     def setAutoErc(self, on: bool) -> None:
         self._shell.auto_erc = on
+
+    @Slot(bool)
+    def setDockExpanded(self, expanded: bool) -> None:
+        self._shell.set_dock_expanded(expanded)
+
+    @Slot(str)
+    def copyToClipboard(self, text: str) -> None:
+        # navigator.clipboard fails in QWebEngineView (setHtml pages aren't
+        # a "secure context") — route through Qt's own clipboard.
+        cb = QGuiApplication.clipboard()
+        if cb is not None:
+            cb.setText(text or "")
 
     @Slot(result="QVariant")
     def listUndoHistory(self) -> List[Dict[str, Any]]:
@@ -815,6 +847,14 @@ class OverlayShell:
         self._gen_thread: Optional[QThread] = None
         self._current_prompt: str = ""
         self._undo_ledger: List[Dict[str, Any]] = []
+        # When Agent asks a clarification, the next user turn continues that
+        # exchange even if the mode dropdown is on Plan/Ask. The UI freezes
+        # the dropdown while this is set.
+        self._pending_clarification: bool = False
+        # Multimodal attachments queued for the next send: list of dicts
+        # {"name": str, "path": str}. Images only for now (PNG/JPG/WEBP).
+        self._pending_attachments: List[Dict[str, str]] = []
+        self._MAX_ATTACHMENTS = 3
         self._gen_worker: Optional[GenerateWorker] = None
         self._inj_thread: Optional[QThread] = None
         self._inj_worker: Optional[InjectWorker] = None
@@ -1039,16 +1079,34 @@ class OverlayShell:
             chat_w = max(220, rect.width() - 2 * margin)
         self.chat.setGeometry(chat_x, chat_y, chat_w, chat_h)
 
-        # -- Dock: centered along the bottom, capped to KiCad width
+        # -- Dock: centered along the bottom, capped to KiCad width.
+        # The Qt window is permanently 300px tall so custom dropdowns have
+        # room to render above the pill without any geometry change (which
+        # forced a Chromium repaint on every open/close = visible flicker).
+        # The transparent 170px above the pill is masked out of the input
+        # region so KiCad receives those clicks — see `_apply_dock_mask`.
         max_dock_w = max(320, rect.width() - 2 * margin)
         dock_w = min(720, max_dock_w)
-        dock_h = min(130, max(80, rect.height() // 4))
+        dock_h = 300
         dock_x = rect.left() + (rect.width() - dock_w) // 2
         dock_y = rect.bottom() - dock_h - margin
         # Never let the dock spill past the top of KiCad's viewport.
         if dock_y < rect.top() + margin:
             dock_y = rect.top() + margin
         self.dock.setGeometry(dock_x, dock_y, dock_w, dock_h)
+        self._apply_dock_mask()
+
+    def _apply_dock_mask(self) -> None:
+        """Restrict Qt input to the pill (bottom) or the full window when a
+        dropdown is open. The transparent top area otherwise steals clicks
+        from KiCad. Called on layout + whenever set_dock_expanded flips."""
+        w = self.dock.width()
+        h = self.dock.height()
+        if getattr(self, "_dock_expanded", False):
+            self.dock.setMask(QRegion(0, 0, w, h))
+        else:
+            pill_h = 130
+            self.dock.setMask(QRegion(0, h - pill_h, w, pill_h))
 
     # ---------------- dock init / state ----------------
 
@@ -1076,6 +1134,90 @@ class OverlayShell:
         agent._failed_models.discard(name)
         agent._working_model = name
 
+    def _set_clarification(self, active: bool) -> None:
+        if active == self._pending_clarification:
+            return
+        self._pending_clarification = active
+        self.bridge.clarificationChanged.emit(active)
+
+    def set_dock_expanded(self, expanded: bool) -> None:
+        # No geometry change — the Qt window stays at its permanent 300px.
+        # Only the input mask flips: pill-only when idle so KiCad receives
+        # clicks in the transparent top area, whole window when a dropdown
+        # is open so its backdrop can catch outside-clicks.
+        self._dock_expanded = expanded
+        self._apply_dock_mask()
+
+    # ---------------- attachments ----------------
+
+    def _push_attachment(self, path: Path) -> None:
+        if len(self._pending_attachments) >= self._MAX_ATTACHMENTS:
+            self._add_activity("Sys",
+                f"attach limit ({self._MAX_ATTACHMENTS}) reached — remove one first")
+            return
+        self._pending_attachments.append({"name": path.name, "path": str(path)})
+        self._emit_attachments()
+
+    def _emit_attachments(self) -> None:
+        self.bridge.attachmentsChanged.emit(list(self._pending_attachments))
+
+    def pick_attachment_file(self) -> None:
+        path_str, _ = QFileDialog.getOpenFileName(
+            self.dock, "Attach a reference image",
+            str(Path.home()),
+            "Images (*.png *.jpg *.jpeg *.webp);;All Files (*)")
+        if not path_str:
+            return
+        p = Path(path_str)
+        if p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            self._add_activity("Err",
+                f"attach: unsupported type {p.suffix} — images only (PNG/JPG/WEBP)")
+            return
+        self._push_attachment(p)
+        self._add_activity("Sys", f"attached: {p.name}")
+
+    def capture_kicad_screenshot(self) -> None:
+        # Grab the KiCad main window. Falls back to primary screen if the
+        # HWND is unknown or grabbing fails.
+        import tempfile
+        from PySide6.QtGui import QPixmap
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self._add_activity("Err", "screenshot: no screen available")
+            return
+        target_hwnd = next(iter(self._kicad_hwnds), 0) or self._target_kicad_hwnd
+        try:
+            if target_hwnd:
+                pixmap = screen.grabWindow(int(target_hwnd))
+            else:
+                pixmap = screen.grabWindow(0)
+        except Exception as exc:  # noqa: BLE001
+            self._add_activity("Err", f"screenshot failed: {exc}")
+            return
+        if pixmap.isNull():
+            self._add_activity("Err", "screenshot: empty capture")
+            return
+        # Save under scratchpad-style temp with a stable naming pattern.
+        tf = tempfile.NamedTemporaryFile(
+            prefix="tracer-shot-", suffix=".png", delete=False)
+        tf.close()
+        pixmap.save(tf.name, "PNG")
+        p = Path(tf.name)
+        self._push_attachment(p)
+        self._add_activity("Sys", f"screenshot: {p.name} ({pixmap.width()}x{pixmap.height()})")
+
+    def remove_attachment(self, index: int) -> None:
+        if 0 <= index < len(self._pending_attachments):
+            gone = self._pending_attachments.pop(index)
+            self._add_activity("Sys", f"removed: {gone['name']}")
+            self._emit_attachments()
+
+    def _clear_attachments(self) -> None:
+        if not self._pending_attachments:
+            return
+        self._pending_attachments = []
+        self._emit_attachments()
+
     # ---------------- target ----------------
 
     def pick_target(self) -> None:
@@ -1092,6 +1234,7 @@ class OverlayShell:
     def new_conversation(self) -> None:
         if self._gen_thread is not None:
             return
+        self._set_clarification(False)
         self._history = []
         self._activity_count = 0
         self._change_count = 0
@@ -1105,7 +1248,19 @@ class OverlayShell:
         prompt = prompt.strip()
         if not prompt:
             return
-        if self._gen_thread is not None or self._inj_thread is not None:
+        # Guard against concurrent runs. Check isRunning() rather than object
+        # presence: a finished QThread lingers between its own `finished`
+        # signal firing and `_reset_gen/_reset_inj` nulling the reference,
+        # and prompts sent in that window shouldn't be rejected. Also
+        # self-heal: if the reference is stale (thread already stopped),
+        # clear it so subsequent guards don't false-fire.
+        busy_gen = self._gen_thread is not None and self._gen_thread.isRunning()
+        busy_inj = self._inj_thread is not None and self._inj_thread.isRunning()
+        if not busy_gen and self._gen_thread is not None:
+            self._reset_gen()
+        if not busy_inj and self._inj_thread is not None:
+            self._reset_inj()
+        if busy_gen or busy_inj:
             self._add_activity("Sys", "already working — cancel first")
             return
         self.bridge.userMessage.emit(prompt)
@@ -1117,12 +1272,26 @@ class OverlayShell:
                 f"model={agent._working_model or agent._choose_model()} auto_erc={self.auto_erc}")
         self.bridge.thinkingChanged.emit(True)
 
-        if self.mode == "ask":
-            self._start_ask(prompt)
+        # Snapshot + clear the attachment queue before spawning the worker —
+        # they're consumed by this turn, not carried forward.
+        attachments = list(self._pending_attachments)
+        if attachments:
+            names = ", ".join(a["name"] for a in attachments)
+            self._add_activity("Sys", f"attachments: {names}")
+            self._clear_attachments()
+
+        # A pending clarification pins the reply to the Agent worker path
+        # so answering the LLM's question feeds back into the same JSON
+        # handshake — regardless of what mode the dropdown shows.
+        if self._pending_clarification:
+            self._add_activity("Sys", "[clarification] continuing agent turn")
+        elif self.mode in ("ask", "plan"):
+            self._start_ask(prompt, kind=self.mode, attachments=attachments)
             return
 
         self._gen_thread = QThread()
-        self._gen_worker = GenerateWorker(prompt, list(self._history))
+        self._gen_worker = GenerateWorker(prompt, list(self._history),
+                                           attachments=attachments)
         self._gen_worker.moveToThread(self._gen_thread)
         self._gen_thread.started.connect(self._gen_worker.run)
         self._gen_worker.log_line.connect(self._on_log_line)
@@ -1133,9 +1302,11 @@ class OverlayShell:
         self._gen_thread.finished.connect(self._reset_gen)
         self._gen_thread.start()
 
-    def _start_ask(self, prompt: str) -> None:
+    def _start_ask(self, prompt: str, kind: str = "ask",
+                   attachments: Optional[List[Dict[str, str]]] = None) -> None:
         self._gen_thread = QThread()
-        self._gen_worker = AskWorker(prompt, list(self._history))
+        self._gen_worker = AskWorker(prompt, list(self._history), kind=kind,
+                                     attachments=attachments or [])
         self._gen_worker.moveToThread(self._gen_thread)
         self._gen_thread.started.connect(self._gen_worker.run)
         self._gen_worker.finished.connect(self._on_ask_finished)
@@ -1157,6 +1328,8 @@ class OverlayShell:
         if self._gen_worker is not None:
             self._gen_worker.cancel()
             self._add_activity("Sys", "cancel requested")
+        # A user-initiated cancel also dismisses any pending clarification.
+        self._set_clarification(False)
 
     # ---------------- worker callbacks ----------------
 
@@ -1208,7 +1381,10 @@ class OverlayShell:
         if status == "clarification_needed":
             q = result.get("question") or ""
             self.bridge.assistantMessage.emit({"body": q, "kind": "ask"})
+            self._set_clarification(True)
             return
+        # Any other terminal status closes an open clarification.
+        self._set_clarification(False)
 
         if status == "backend_rejected":
             msg = (f"Backend rejected at '{result.get('error_stage','?')}':\n"
@@ -1273,10 +1449,6 @@ class OverlayShell:
             self._add_activity("Sys",
                 "no target set — pick a .kicad_sch to enable inject")
             self.bridge.changesFinalized.emit(True)  # still show Keep/Discard buttons
-        elif self.mode == "plan":
-            # Plan mode: never auto-inject, even with Auto-ERC on.
-            self._add_activity("Sys", "[plan] review changes and click Keep to apply")
-            self.bridge.changesFinalized.emit(True)
         elif self.auto_erc and erc.get("ran") and erc.get("clean"):
             # Auto-inject when ERC is clean and Auto-ERC is on.
             self._start_inject()
@@ -1287,12 +1459,21 @@ class OverlayShell:
     @Slot(str)
     def _on_generate_failed(self, message: str) -> None:
         self.bridge.thinkingChanged.emit(False)
+        self._set_clarification(False)
         first = message.splitlines()[0] if message else "unknown error"
         if first == "cancelled":
             self.bridge.assistantMessage.emit({"body": "Cancelled.", "kind": "info"})
         else:
-            self.bridge.assistantMessage.emit({"body": f"✗ {first}", "kind": "error"})
+            # Show the full error in the chat bubble (capped) so backend
+            # rejection bodies are diagnosable, not just the topline.
+            capped = message if len(message) < 2000 else message[:2000] + "\n… (truncated)"
+            self.bridge.assistantMessage.emit({"body": f"✗ {capped}", "kind": "error"})
             self._add_activity("Err", first)
+            # Also break the body into per-line Activity entries so the
+            # backend's traceback / 500 body is scannable there too.
+            for line in message.splitlines()[1:]:
+                if line.strip():
+                    self._add_activity("Err", line.rstrip()[:400])
         print(message, file=sys.stderr)
 
     def _reset_gen(self) -> None:
