@@ -72,6 +72,39 @@ new plugin.
 
 ---
 
+## Updating an existing install
+
+You cloned earlier and want the new features. Same three-step loop every
+time you update:
+
+```bash
+cd tracer-engine
+git pull                       # latest source
+venv\Scripts\activate
+pip install -r requirements.txt  # in case a dep was added
+python deploy.py               # re-syncs plugin + eradicates ghost copies
+```
+
+Then:
+
+1. **Kill any running Tracer sidecar** so the new code loads next launch:
+
+   ```powershell
+   Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
+     Where-Object { $_.CommandLine -like '*sidecar_app.py*' } |
+     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+   ```
+
+2. **Fully quit KiCad** (File → Quit; not just close the project).
+3. Relaunch KiCad. Click the coral ⚡ toolbar button.
+
+The sidecar spawns fresh from the newly deployed plugin dir. If the
+toolbar icon looks wrong or nothing launches, `python deploy.py --dry-run`
+will show you every path it was going to write to and you can eyeball
+whether they match your `Documents/KiCad/10.0/plugins/`.
+
+---
+
 ## First run
 
 1. Open KiCad. Open any project (Schematic Editor or PCB Editor — either
@@ -105,6 +138,34 @@ The dropdown in the dock has four modes:
 | **Ask** | Plain Q&A. No circuit generation, no injection. Just a text reply. |
 | **Plan** | Design conversation. LLM outputs a components/nets/notes outline as text — no backend build, no schematic gen, no inject. Switch to Agent to actually build the plan you agreed on. |
 | **Debug** | Same as Agent, plus verbose Activity lines (mode/target/model dump, per-component ref/symbol/footprint) |
+
+**Clarification-aware routing.** If Agent asks a follow-up ("what type of
+LED?"), your next reply is automatically routed to the running Agent turn
+regardless of what the mode dropdown shows. The mode dropdown greys out,
+the textarea placeholder swaps to *"Answer the clarification…"*, and the
+send button turns amber to signal the state. Cancel dismisses the pending
+clarification.
+
+---
+
+## Attachments
+
+Click the **+** button in the dock to attach reference material to your
+next prompt. Two sources:
+
+- **Attach file…** — file dialog, accepts PNG / JPG / JPEG / WEBP.
+- **Screenshot KiCad** — captures the KiCad main window (falls back to
+  the primary screen if the window handle is unknown).
+
+Attached items show as chips above the textarea. Each chip has an × to
+remove it. Max three attachments per turn. Images are thumbnailed to
+1024×1024 before being sent to Gemini to cap token cost. Attachments
+apply to that Send only — they clear after send, and repair turns don't
+carry them forward.
+
+PDF and text attachments are deliberately not supported yet — the current
+Gemini SDK is deprecated and its PDF handling is awkward. See
+[ROADMAP.md](docs/ROADMAP.md) for the SDK-migration entry.
 
 ---
 

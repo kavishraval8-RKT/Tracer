@@ -11,6 +11,22 @@ generates the schematic and merges it into your open sheet.
 → Schematic drawn, ERC checked, DRC + schematic-parity reported, undo history
 kept per prompt.
 
+## Highlights
+
+- **Four modes** — Agent (generate + inject), Ask (Q&A), Plan (design
+  outline, no build), Debug (verbose logs).
+- **Clarification-aware routing** — when Agent asks a follow-up, your reply
+  automatically continues the same turn even if the mode dropdown says
+  otherwise. Dropdown greys out; send button turns amber.
+- **Attachments** — click **+** to attach a PNG/JPG or capture the current
+  KiCad window. Images ride the next prompt as multimodal Gemini input.
+- **Per-prompt undo** — every inject writes a timestamped snapshot; the
+  ↶ button opens a modal to restore any earlier state.
+- **DRC + schematic-parity** — every inject runs `kicad-cli pcb drc
+  --schematic-parity` on the sibling `.kicad_pcb` and streams violations
+  into the Activity log.
+- **Markdown-rendered replies** — headers, bold, code, lists.
+
 ## Status
 
 - **Windows 11 + KiCad 10** — supported and tested
@@ -33,6 +49,13 @@ python deploy.py
 ```
 
 Fully quit and relaunch KiCad. Coral ⚡ shows up in the toolbar.
+
+## Updating
+
+Already cloned? [SETUP.md → Updating an existing install](SETUP.md#updating-an-existing-install)
+has the three-step loop: `git pull` → re-run `deploy.py` → fully quit +
+relaunch KiCad. Any running Tracer sidecar needs to be killed so the new
+code loads on next launch.
 
 ## Layout
 
