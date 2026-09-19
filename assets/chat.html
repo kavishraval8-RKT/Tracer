@@ -136,9 +136,22 @@
 <body class="bg-transparent m-0 p-0 font-sans antialiased h-screen w-screen overflow-hidden text-[#26251E]">
 <div id="app" class="bg-[#F7F7F4] border border-[#E5E7EB] rounded-xl shadow-2xl flex flex-col h-full w-full overflow-hidden box-border">
 
-  <!-- Top Header Bar: Clean horizontal bar with drag, dropdown, and utility buttons -->
-  <header class="bg-white border-b border-[#E5E7EB] px-3 py-2 flex items-center justify-between text-xs cursor-move select-none shrink-0" onmousedown="pyBridge && pyBridge.startDrag && pyBridge.startDrag('chat')">
+  <!-- Top Header Bar. Drag removed: the KiCad watcher re-snaps the chat
+       panel to its computed position on every 500ms tick, so dragging
+       only produces a jarring rubber-band. -->
+  <header class="bg-white border-b border-[#E5E7EB] px-3 py-2 flex items-center justify-between text-xs select-none shrink-0">
     <div class="flex items-center gap-1 font-medium text-[#26251E] cursor-pointer">Chat ▾</div>
+    <div class="flex items-center gap-1">
+      <!-- Account: direct bridge call — opens /billing in the default browser. -->
+      <button onclick="pyBridge && pyBridge.openAccountPage && pyBridge.openAccountPage()"
+              title="Account & usage"
+              class="w-6 h-6 flex items-center justify-center text-gray-500 hover:text-[#26251E] hover:bg-black/[0.05] rounded transition-colors">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" class="w-3.5 h-3.5">
+          <circle cx="8" cy="5" r="2.5"/>
+          <path stroke-linecap="round" d="M3.5 13.5c0-2.2 2-4 4.5-4s4.5 1.8 4.5 4"/>
+        </svg>
+      </button>
+    </div>
   </header>
 
   <!-- Scrollable Feed: Chat messages stack naturally from top to bottom -->
@@ -206,6 +219,33 @@
 </div>
 
 <!-- Undo modal: chat panel is 620px tall, room for a real list. Fires from dock. -->
+<!-- Auth overlay: covers the whole chat panel until the user is logged in.
+     Renders one of three states: logged_out (Sign in button), pending
+     (show user_code + Open browser + Cancel), logged_in (invisible). -->
+<div id="authOverlay" class="hidden fixed inset-0 z-40 bg-[#F7F7F4] flex flex-col items-center justify-center p-6 text-center">
+  <div id="authLoggedOut" class="hidden max-w-xs">
+    <div class="text-lg font-semibold text-[#26251E]">Sign in to Tracer</div>
+    <p class="mt-2 text-sm text-gray-600 leading-relaxed">Tracer runs in the cloud — sign in with your account to start using the plugin.</p>
+    <button onclick="pyBridge.login()" class="mt-6 w-full bg-[#26251E] hover:bg-black text-white text-sm font-semibold rounded-lg px-4 py-2.5 transition-colors">
+      Sign in
+    </button>
+    <p class="mt-3 text-[11px] text-gray-500">Opens your browser to complete sign-in.</p>
+  </div>
+  <div id="authPending" class="hidden max-w-xs">
+    <div class="text-lg font-semibold text-[#26251E]">Almost there</div>
+    <p class="mt-2 text-sm text-gray-600 leading-relaxed">A browser tab should have opened. Sign in on the web, then paste this code:</p>
+    <div id="authUserCode" class="mt-4 font-mono tracking-widest text-2xl font-semibold text-[#26251E] bg-white border border-[#E5E7EB] rounded-lg py-3">—</div>
+    <div class="mt-4 flex gap-2">
+      <button onclick="openVerificationUrl()" class="flex-1 bg-white border border-[#E5E7EB] hover:bg-gray-50 text-[#26251E] text-xs font-semibold rounded-lg px-3 py-2 transition-colors">Open browser</button>
+      <button onclick="pyBridge.cancelLogin()" class="flex-1 bg-white border border-[#E5E7EB] hover:bg-gray-50 text-[#dc2626] text-xs font-semibold rounded-lg px-3 py-2 transition-colors">Cancel</button>
+    </div>
+    <p class="mt-3 text-[11px] text-gray-500 flex items-center justify-center gap-1.5">
+      <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+      Waiting for you to sign in…
+    </p>
+  </div>
+</div>
+
 <div id="undoModal" class="hidden fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onclick="if(event.target===this) closeUndoModal()">
   <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[85vh] overflow-hidden flex flex-col border border-[#E5E7EB]">
     <div class="p-4 border-b border-[#E5E7EB]">
@@ -241,7 +281,9 @@ new QWebChannel(qt.webChannelTransport, function(channel) {
   pyBridge.chatCleared.connect(clearAll);
   pyBridge.changesFinalized.connect(showChangeActions);
   pyBridge.showUndoModal.connect(openUndoModal);
+  pyBridge.authStateChanged.connect(renderAuthState);
   pyBridge.requestInit();
+  pyBridge.requestAuthState();
 });
 
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -430,6 +472,61 @@ function setTargetFile(name) {
   // Target info displayed in kicadStatus in header now
   const s = document.getElementById('kicadStatus');
   if (s) s.textContent = name ? `Target: ${name}` : 'no schematic detected';
+}
+
+// ---------------- Auth overlay ----------------
+let authCurrentUrl = "";
+let accountUrl = "";  // pushed by Python via authStateChanged; used as
+                      // window.open fallback when the bridge slot fails
+
+function openAccountPage() {
+  // Preferred: Python-side webbrowser.open() (logs to Activity, uses OS
+  // default handler). Fallback: window.open, in case the bridge slot
+  // isn't callable for any reason.
+  let bridgedFired = false;
+  try {
+    if (pyBridge && typeof pyBridge.openAccountPage === 'function') {
+      pyBridge.openAccountPage();
+      bridgedFired = true;
+    }
+  } catch (_) { /* fall through to window.open */ }
+  if (!bridgedFired && accountUrl) {
+    window.open(accountUrl, '_blank');
+  }
+}
+
+function renderAuthState(state) {
+  if (state && state.account_url) accountUrl = state.account_url;
+  const overlay = document.getElementById('authOverlay');
+  const outEl = document.getElementById('authLoggedOut');
+  const pendEl = document.getElementById('authPending');
+  const kind = (state && state.state) || 'logged_out';
+
+  if (kind === 'logged_in') {
+    overlay.classList.add('hidden');
+    outEl.classList.add('hidden');
+    pendEl.classList.add('hidden');
+    return;
+  }
+
+  overlay.classList.remove('hidden');
+  if (kind === 'pending') {
+    outEl.classList.add('hidden');
+    pendEl.classList.remove('hidden');
+    document.getElementById('authUserCode').textContent = state.user_code || '—';
+    authCurrentUrl = state.verification_uri_complete || state.verification_uri || '';
+  } else {
+    // logged_out (or any unknown fallback)
+    pendEl.classList.add('hidden');
+    outEl.classList.remove('hidden');
+    authCurrentUrl = '';
+  }
+}
+
+function openVerificationUrl() {
+  // Python already tried to open the default browser once; give the user a
+  // second chance via window.open in case it was blocked or missed.
+  if (authCurrentUrl) window.open(authCurrentUrl, '_blank');
 }
 
 // ---------------- Undo modal ----------------

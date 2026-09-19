@@ -56,3 +56,7 @@ backend/*.db
 backend/*.db-journal
 backend/.env
 backend/tracer_backend.db*
+
+# --- plugin dev URL override -----------------------------------------------
+# Per-machine dev URLs for the SaaS backend. Falls back to prod when absent.
+.tracer.env

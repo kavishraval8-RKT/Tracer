@@ -356,32 +356,65 @@ curl.exe -i -H "Authorization: Bearer $($tok1.access_token)" http://127.0.0.1:81
 
 ## What's built vs. what isn't
 
-### Landed (Slices A + C + D + E)
+### Landed
 
+**Slice A + C + D + E — auth backbone (previous commit).**
 - Frontend: `/api/device/code`, `/api/device/token`, `/activate` page,
   `signIn`/`signUp` honor `?next=`, RFC 8628 flow, JWT with `jti`.
 - Supabase: `device_codes`, `usage_ledger`, `active_device_jti` column
   on `profiles`.
 - Backend: FastAPI on 8100, JWT verification with jti freshness check,
   `agent.py` mounted at `/v1/generate|ask|plan|me`.
-- **End-to-end proven** with a real Gemini reply.
 
-### Not landed (Slices F + G + H + I + J)
+**Slice G + H + I + J — plugin cutover to cloud (this commit).**
+- **G — Login UI.** `tracer_auth.py` module drives the RFC 8628 flow
+  from the plugin side: mints device_code, opens `/activate` in the
+  system browser via `webbrowser.open()`, polls `/api/device/token`
+  every 5 s with cancellation, surfaces per-step activity into the
+  chat log. Chat panel shows a full-window overlay in three states:
+  `logged_out` (Sign in button), `pending` (user_code + Open browser
+  + Cancel + pulsing "waiting…"), `logged_in` (invisible → normal UI).
+- **H — JWT storage.** `%APPDATA%\Tracer\token.json` (or
+  `~/.config/tracer/token.json` on POSIX). 0600 perms on POSIX; on
+  Windows the file lives in the user's private profile dir. Loaded
+  on shell init so the next KiCad launch skips the whole login dance.
+- **I — Route through backend.** `tracer_api.py` mirrors
+  `agent.build_with_auto_repair` / `ask_gemini` / `plan_gemini`
+  signatures but posts HTTP to `TRACER_API_URL/v1/*` with the Bearer
+  token. `GenerateWorker` and `AskWorker` in `sidecar_app.py` call
+  `tracer_api.*` instead of `agent.*`. The plugin no longer needs
+  `GEMINI_API_KEY` — every LLM call rides the cloud path.
+- **J — Error taxonomy.** `NotAuthenticatedError` / `QuotaExceededError`
+  / `CloudUnreachableError` map to distinct UX outcomes:
+    - 401 → local token cleared, chat overlay reappears with
+      "Signed out. Please sign in again."
+    - 402 → chat bubble points at the Account & usage icon.
+    - 5xx / network → full body streamed into Activity for triage.
 
-- **Slice F — Quota + usage ledger.** Every `/v1/*` request writes a
-  `usage_ledger` row and rejects with `402 Payment Required` when the
-  user's monthly quota is exceeded.
-- **Slice G — Plugin Login UI.** Button in the dock/settings that kicks
-  off the device flow: hit `/api/device/code`, show the `user_code`,
-  open the browser at `verification_uri_complete`, start polling.
-- **Slice H — JWT storage.** Persist `access_token` to a `0600` file
-  next to the plugin's `.env`. Read on startup.
-- **Slice I — Route through backend.** `agent.py`'s direct Gemini calls
-  become HTTP POSTs to `http://127.0.0.1:8100/v1/*` (or the deployed
-  URL) with the JWT. The plugin stops needing its own `GEMINI_API_KEY`.
-- **Slice J — Error UX.** 401 `revoked` triggers a re-login prompt.
-  402 shows an "upgrade" banner. 5xx surfaces "Tracer cloud is having
-  a moment" without crashing the plugin.
+**Bonus this commit.**
+- **Settings/account icon** in the chat header. Direct
+  `pyBridge.openAccountPage()` opens `<TRACER_WEB_URL>/billing` in the
+  system default browser.
+- **`.tracer.env` file fallback** for URL config. Solves the Windows
+  Explorer-stale-env-snapshot problem: the plugin now reads
+  `TRACER_WEB_URL` / `TRACER_API_URL` from a file next to
+  `tracer_auth.py` when the process env doesn't provide them.
+- **Removed drag from the chat header.** The KiCad watcher re-snaps
+  panel geometry every 500 ms, so dragging only produced a jarring
+  rubber-band. Also fixed a subtle bug where the header's `onmousedown`
+  drag handler was swallowing button clicks (nested `<button>` inside
+  the drag zone → `startDrag()` fires → `click` never dispatches).
+
+### Not landed (Slice F + deploy + Stripe)
+
+- **Slice F — Quota + usage ledger** (next up). Every `/v1/*` request
+  writes a `usage_ledger` row and rejects with `402 Payment Required`
+  when the user's monthly quota is exceeded. Plugin's 402 error path is
+  already wired but unreachable until this ships.
+- **SaaS-4 — Deploy** to Render + Vercel with `api.<domain>` and
+  `<domain>` respectively. Plugin URL defaults point to prod.
+- **SaaS-5 — Stripe subscription tiers.** Free / Basic / Pro quotas.
+  Webhook flips `profiles.plan` and resets `tokens_used_this_period`.
 
 ### Deferred entirely (see DEFERRED.md)
 

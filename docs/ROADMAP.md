@@ -264,12 +264,16 @@ progress events only. Every phase below stops at a shippable state.
   local SQLite dev; models for User, Subscription, DeviceCode,
   UsageLedger; `/health` + `/version` endpoints; monorepo `backend/`
   folder.
-- [ ] **SaaS-2 — Device Code Flow**: RFC 8628 endpoints
-  (`/device/code`, `/device/token`), JWT issuance, `/activate` page
-  frontend, plugin Login button + polling loop.
-- [ ] **SaaS-3 — LLM proxy**: `/v1/generate|ask|plan` mirror current
-  agent shape, prompt injection server-side, quota enforcement with
-  `402 Payment Required`, SSE progress events.
+- [x] **SaaS-2 — Device Code Flow**: RFC 8628 endpoints
+  (`/device/code`, `/device/token`), JWT issuance with `jti`
+  rotation for single-plugin-per-user enforcement, `/activate` page
+  frontend, plugin Login button + polling loop, JWT storage in
+  `%APPDATA%\Tracer\token.json`.
+- [ ] **SaaS-3 — LLM proxy** (partial — quota deferred to Slice F).
+  Landed: `/v1/generate|ask|plan|me` mirror the agent shape and are
+  gated by the JWT dependency; plugin's workers cut over to HTTP via
+  `tracer_api.py`. Still pending: quota enforcement + usage_ledger
+  writes, SSE progress events.
 - [ ] **SaaS-4 — Deploy**: Render service, health probes on cold start,
   plugin cloud-down error UX (no BYOK fallback — hard fail with clear
   message).

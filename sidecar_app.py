@@ -47,6 +47,8 @@ from PySide6.QtWebChannel import QWebChannel
 
 from app import app as fastapi_app
 import agent
+import tracer_auth
+import tracer_api
 
 sys.path.insert(0, str(Path(__file__).parent / "tracer_plugin"))
 import tracer_inject  # noqa: E402
@@ -139,7 +141,10 @@ class GenerateWorker(QObject):
             def log(line: str) -> None:
                 if not self._cancelled:
                     self.log_line.emit(line)
-            result = agent.build_with_auto_repair(
+            # Slice I: cloud path. tracer_api mirrors agent.py's return
+            # shape so downstream _on_generate_finished sees the same
+            # {status, circuit, backend, history} dict.
+            result = tracer_api.build_with_auto_repair(
                 self._prompt, history=self._history, log=log,
                 attachments=self._attachments)
             if self._cancelled:
@@ -169,7 +174,7 @@ class AskWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            fn = agent.plan_gemini if self._kind == "plan" else agent.ask_gemini
+            fn = tracer_api.plan_gemini if self._kind == "plan" else tracer_api.ask_gemini
             reply = fn(self._prompt, self._history,
                        attachments=self._attachments)
             self.finished.emit(reply)
@@ -642,6 +647,7 @@ class PyBridge(QObject):
     showUndoModal = Signal("QVariant")   # -> chat panel
     clarificationChanged = Signal(bool)  # -> dock (freezes mode dropdown)
     attachmentsChanged = Signal("QVariant")   # -> dock (chip list)
+    authStateChanged = Signal("QVariant")     # -> chat panel + dock; login flow state
 
     def __init__(self, shell: "OverlayShell") -> None:
         super().__init__()
@@ -735,6 +741,29 @@ class PyBridge(QObject):
     def requestUndoModal(self) -> None:
         # Dock triggers this; chat panel listens on showUndoModal and renders.
         self.showUndoModal.emit(self._shell.list_undo_history())
+
+    # ---- auth ----
+
+    @Slot()
+    def requestAuthState(self) -> None:
+        self._shell.push_auth_state()
+
+    @Slot()
+    def login(self) -> None:
+        self._shell.start_login()
+
+    @Slot()
+    def cancelLogin(self) -> None:
+        self._shell.cancel_login()
+
+    @Slot()
+    def logout(self) -> None:
+        self._shell.logout()
+
+    @Slot()
+    def openAccountPage(self) -> None:
+        print("[bridge] openAccountPage slot entered", file=sys.stderr, flush=True)
+        self._shell.open_account_page()
 
     @Slot()
     def pickTarget(self) -> None:
@@ -855,6 +884,12 @@ class OverlayShell:
         # {"name": str, "path": str}. Images only for now (PNG/JPG/WEBP).
         self._pending_attachments: List[Dict[str, str]] = []
         self._MAX_ATTACHMENTS = 3
+
+        # Auth: JWT loaded from disk if present. Login flow spawns a
+        # DeviceFlow instance while active; cancel() stops the polling loop.
+        self._auth_token: Optional[Dict[str, Any]] = tracer_auth.load_token()
+        self._auth_flow: Optional[tracer_auth.DeviceFlow] = None
+        self._auth_pending: Optional[Dict[str, Any]] = None  # user_code / uri while polling
         self._gen_worker: Optional[GenerateWorker] = None
         self._inj_thread: Optional[QThread] = None
         self._inj_worker: Optional[InjectWorker] = None
@@ -1147,6 +1182,96 @@ class OverlayShell:
         # is open so its backdrop can catch outside-clicks.
         self._dock_expanded = expanded
         self._apply_dock_mask()
+
+    # ---------------- auth ----------------
+
+    def _auth_state_payload(self) -> Dict[str, Any]:
+        """Snapshot the UI reads. Kept small: no JWT ever crosses the bridge."""
+        # Always include the account URL so the JS "Account & usage" button
+        # can fall back to window.open when the bridge slot fails to fire
+        # (race between button-click and QWebChannel slot registration).
+        account_url = f"{tracer_auth.web_url()}/billing"
+        if self._auth_flow is not None:
+            return {
+                "state": "pending",
+                "user_code": (self._auth_pending or {}).get("user_code", ""),
+                "verification_uri": (self._auth_pending or {}).get("verification_uri", ""),
+                "verification_uri_complete": (self._auth_pending or {}).get(
+                    "verification_uri_complete", ""),
+                "account_url": account_url,
+            }
+        if self._auth_token and self._auth_token.get("access_token"):
+            return {
+                "state": "logged_in",
+                "account_url": account_url,
+                # No token in the payload — the JS side never needs to see it.
+                # If we later show account details we can re-decode server-side.
+            }
+        return {"state": "logged_out", "account_url": account_url}
+
+    def push_auth_state(self) -> None:
+        self.bridge.authStateChanged.emit(self._auth_state_payload())
+
+    def start_login(self) -> None:
+        if self._auth_flow is not None:
+            self._add_activity("Sys", "[auth] already logging in")
+            return
+        self._add_activity("Sys", f"[auth] contacting {tracer_auth.web_url()} …")
+
+        # Qt-thread-safe callbacks — DeviceFlow runs on its own daemon
+        # thread; we route each event through the bridge signal which
+        # Qt marshals back to the main thread.
+        def on_pending(info: Dict[str, Any]) -> None:
+            self._auth_pending = info
+            self._add_activity(
+                "Sys", f"[auth] paste code {info.get('user_code', '?')} in browser")
+            self.push_auth_state()
+
+        def on_success(token: Dict[str, Any]) -> None:
+            self._auth_token = token
+            self._auth_flow = None
+            self._auth_pending = None
+            self._add_activity("Obs", "[auth] logged in")
+            self.push_auth_state()
+
+        def on_error(msg: str) -> None:
+            self._auth_flow = None
+            self._auth_pending = None
+            self._add_activity("Err", f"[auth] {msg}")
+            self.push_auth_state()
+
+        self._auth_flow = tracer_auth.DeviceFlow(
+            on_pending=on_pending, on_success=on_success, on_error=on_error,
+        )
+        self._auth_flow.start()
+        self.push_auth_state()
+
+    def cancel_login(self) -> None:
+        if self._auth_flow is not None:
+            self._auth_flow.cancel()
+            self._auth_flow = None
+            self._auth_pending = None
+            self._add_activity("Sys", "[auth] login cancelled")
+            self.push_auth_state()
+
+    def logout(self) -> None:
+        self.cancel_login()
+        tracer_auth.clear_token()
+        self._auth_token = None
+        self._add_activity("Sys", "[auth] logged out")
+        self.push_auth_state()
+
+    def open_account_page(self) -> None:
+        import webbrowser
+        url = f"{tracer_auth.web_url()}/billing"
+        print(f"[account] open_account_page url={url}", file=sys.stderr, flush=True)
+        try:
+            opened = webbrowser.open(url)
+            print(f"[account] webbrowser.open returned {opened}", file=sys.stderr, flush=True)
+            self._add_activity("Sys", f"[account] opened {url}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[account] webbrowser.open raised: {exc}", file=sys.stderr, flush=True)
+            self._add_activity("Err", f"[account] could not open browser: {exc}")
 
     # ---------------- attachments ----------------
 
@@ -1461,6 +1586,26 @@ class OverlayShell:
         self.bridge.thinkingChanged.emit(False)
         self._set_clarification(False)
         first = message.splitlines()[0] if message else "unknown error"
+        # Slice I: recognize cloud-auth failure and drop to logged_out so
+        # the chat overlay reappears without the user hunting for a Logout
+        # button. tracer_api raises NotAuthenticatedError which formats to
+        # "NotAuthenticatedError: <reason>" via the worker's failure emit.
+        if "NotAuthenticatedError" in first:
+            self._auth_token = None
+            self._add_activity("Err", "[auth] token rejected — signing you out")
+            self.push_auth_state()
+            self.bridge.assistantMessage.emit({
+                "body": "Signed out. Please sign in again.",
+                "kind": "error",
+            })
+            return
+        if "QuotaExceededError" in first:
+            self._add_activity("Err", "[quota] monthly limit reached")
+            self.bridge.assistantMessage.emit({
+                "body": "You've hit your monthly quota. Open Account (top-right of chat) to upgrade.",
+                "kind": "error",
+            })
+            return
         if first == "cancelled":
             self.bridge.assistantMessage.emit({"body": "Cancelled.", "kind": "info"})
         else:
