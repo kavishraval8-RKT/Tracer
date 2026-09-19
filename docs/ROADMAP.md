@@ -254,6 +254,31 @@ actually works headlessly. If that spike fails, 3.4 is dead too.
 
 ---
 
+## SaaS distribution track (parallel to Phase 2/3)
+
+Announced late in-session; not part of the original phase 2 sequence but
+now the primary next-work track. Cloud-only (BYOK dropped). Streaming =
+progress events only. Every phase below stops at a shippable state.
+
+- [x] **SaaS-1 — Backend scaffold**: FastAPI + async SQLAlchemy + Alembic;
+  local SQLite dev; models for User, Subscription, DeviceCode,
+  UsageLedger; `/health` + `/version` endpoints; monorepo `backend/`
+  folder.
+- [ ] **SaaS-2 — Device Code Flow**: RFC 8628 endpoints
+  (`/device/code`, `/device/token`), JWT issuance, `/activate` page
+  frontend, plugin Login button + polling loop.
+- [ ] **SaaS-3 — LLM proxy**: `/v1/generate|ask|plan` mirror current
+  agent shape, prompt injection server-side, quota enforcement with
+  `402 Payment Required`, SSE progress events.
+- [ ] **SaaS-4 — Deploy**: Render service, health probes on cold start,
+  plugin cloud-down error UX (no BYOK fallback — hard fail with clear
+  message).
+- [ ] **SaaS-5 — Stripe subscription**: tier definitions
+  (free/pro/team), Stripe checkout, webhook flips tier + resets quota,
+  usage dashboard on website.
+
+---
+
 ## Phase 4 — long-term (worth naming, not scheduling)
 
 ### 4.1 Cross-platform

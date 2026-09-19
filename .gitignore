@@ -49,3 +49,10 @@ logs/
 docs/superpowers/
 *.tracer-bak
 *.tracer-bak.*
+
+# --- backend ---------------------------------------------------------------
+backend/.venv/
+backend/*.db
+backend/*.db-journal
+backend/.env
+backend/tracer_backend.db*

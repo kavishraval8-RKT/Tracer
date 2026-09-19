@@ -1186,6 +1186,96 @@ def _classify_verification(detail: str) -> str:
     return "verification-routing"
 
 
+_VERIF_ROUTE_RX = __import__("re").compile(
+    r"(\w+):\s*no route between "
+    r"\(([\d.]+)\s*,\s*([\d.]+)\)"
+    r"\s*and\s*"
+    r"\(([\d.]+)\s*,\s*([\d.]+)\)"
+)
+_VERIF_BLOCKER_RX = __import__("re").compile(
+    r"nearest blocker:\s*endpoint\s*"
+    r"\(([\d.]+)\s*,\s*([\d.]+)\)"
+)
+
+
+def _extract_verification_facts(
+    detail: str, circuit: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Pull structured fields out of a verification-routing error.
+
+    The engine's message looks like:
+      LED_DRAIN: no route between (224.79, 13.97) and (250.19, 21.59)
+      clears the obstacles (nearest blocker: endpoint (247.65, 11.43) on
+      ((247.65, 10.16), (247.65, 19.05))).
+
+    Returns {net, from, to, blocker, components_on_net}. Any field can be
+    absent if the parse partially failed.
+    """
+    facts: Dict[str, Any] = {}
+    if not detail:
+        return facts
+    m = _VERIF_ROUTE_RX.search(detail)
+    if m:
+        facts["net"] = m.group(1)
+        facts["from"] = (float(m.group(2)), float(m.group(3)))
+        facts["to"] = (float(m.group(4)), float(m.group(5)))
+    m = _VERIF_BLOCKER_RX.search(detail)
+    if m:
+        facts["blocker"] = (float(m.group(1)), float(m.group(2)))
+    # Reverse-lookup: which components are wired to the failing net.
+    if "net" in facts and circuit:
+        for net in circuit.get("nets") or []:
+            if net.get("name") != facts["net"]:
+                continue
+            refs: List[str] = []
+            for conn in net.get("connections") or []:
+                if isinstance(conn, dict) and conn.get("ref"):
+                    refs.append(str(conn["ref"]))
+                elif isinstance(conn, str):
+                    # "REF.pin" shape — take the ref part
+                    refs.append(conn.split(".", 1)[0])
+            if refs:
+                facts["components_on_net"] = refs
+            break
+    return facts
+
+
+def _structured_repair_addendum(facts: Dict[str, Any]) -> str:
+    """Turn parsed verification facts into a compact instruction block.
+
+    Called by repair_prompt; a generic 'give parts more room' hint burns a
+    turn on a near-identical retry, whereas 'component R2 sits on LED_DRAIN
+    — move IT or rotate it' names the exact knob to change.
+    """
+    if not facts:
+        return ""
+    lines = []
+    if "net" in facts:
+        lines.append(f"- The unroutable net is **{facts['net']}**.")
+    if facts.get("components_on_net"):
+        refs = ", ".join(facts["components_on_net"])
+        lines.append(
+            f"- Components wired to {facts['net']}: {refs}. Reposition or "
+            f"rotate ONE of these; don't shuffle everything."
+        )
+    if "from" in facts and "to" in facts:
+        lines.append(
+            f"- The route needed to reach {facts['to']} from {facts['from']}."
+        )
+    if "blocker" in facts:
+        lines.append(
+            f"- The blocking pin sits at {facts['blocker']}. If any of the "
+            f"components above owns that coordinate, that's the one to move."
+        )
+    if not lines:
+        return ""
+    return (
+        "\n\n### Structured failure facts\n"
+        + "\n".join(lines)
+        + "\n\nUse these specifics — do not just increase spacing globally.\n"
+    )
+
+
 def repair_prompt(result: Dict[str, Any]) -> str:
     """Turn an engine rejection into a stage-aware instruction Gemini can act on.
 
@@ -1204,10 +1294,18 @@ def repair_prompt(result: Dict[str, Any]) -> str:
         guidance_key = _classify_verification(detail)
 
     guidance = _REPAIR_GUIDANCE.get(guidance_key, _REPAIR_GUIDANCE["layout"])
+    # Structured addendum only fires for routing failures where a parseable
+    # coordinate exists. Everything else falls through to the generic
+    # per-stage recipe.
+    addendum = ""
+    if guidance_key == "verification-routing":
+        facts = _extract_verification_facts(detail, result.get("circuit"))
+        addendum = _structured_repair_addendum(facts)
     return (
         f"The backend rejected that circuit at the '{stage}' stage:\n\n"
         f"{detail}\n\n"
-        f"{guidance}\n\n"
+        f"{guidance}"
+        f"{addendum}\n\n"
         f"Do not ask a question; return a full \"success\" payload with the fix."
     )
 
