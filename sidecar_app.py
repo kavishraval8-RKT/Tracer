@@ -1603,6 +1603,20 @@ class OverlayShell:
                 "kind": "error",
             })
             return
+        if "CloudUnreachableError" in first:
+            # Network / DNS / 5xx / non-JSON body. Give beta users a
+            # readable line instead of "network: HTTPSConnectionPool(...)".
+            summary = first.split("CloudUnreachableError:", 1)[-1].strip() or "backend unreachable"
+            self._add_activity("Err", f"[cloud] {summary}")
+            self.bridge.assistantMessage.emit({
+                "body": (
+                    "Backend unreachable — check your internet, then try again.\n"
+                    "If this keeps happening, the service may be down: "
+                    "https://tracer.dev/status"
+                ),
+                "kind": "error",
+            })
+            return
         if "QuotaExceededError" in first:
             # Message shape from tracer_api: "hobby tier: used 210,000 / 200,000 tokens this month"
             summary = first.split("QuotaExceededError:", 1)[-1].strip()
@@ -1855,6 +1869,8 @@ def main() -> int:
     parser.add_argument("--kicad-hwnd", type=int, default=0)
     args = parser.parse_args()
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+    from tracer_version import TRACER_VERSION
+    print(f"[tracer] sidecar v{TRACER_VERSION} starting", file=sys.stderr, flush=True)
     if not _acquire_instance():
         return 0
     backend = BackendServer()

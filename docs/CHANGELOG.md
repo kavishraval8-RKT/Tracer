@@ -35,15 +35,55 @@ Commit hashes below are `engine/frontend` when both are involved.
 _(Moves here as work lands. Empty means the working tree matches the last
 tagged commit.)_
 
-Bumped agent client timeouts + halved MAX_REPAIRS:
+**Pre-beta hardening + beta doc:**
+
+- `tracer_version.py` — single source of truth for plugin version
+  (`TRACER_VERSION = "0.1.0"`). Logged on sidecar startup and sent as
+  `X-Tracer-Version` on every backend request so server logs can be
+  matched against bug reports.
+- Backend `app/main.py` — one-line access log middleware per request:
+  `[req] POST /v1/ask -> 200 3421ms plugin=0.1.0 ip=1.2.3.4`. Writes
+  to stdout, so Render aggregates it automatically.
+- `sidecar_app.py` — dedicated `CloudUnreachableError` branch. Beta
+  users now see *"Backend unreachable — check your internet…"* instead
+  of a raw `HTTPSConnectionPool(...)` traceback.
+- `assets/chat.html` — Copy button rewritten a second time. Per-button
+  `addEventListener` with closure-captured markdown + hidden textarea
+  fallback. `pyBridge.copyToClipboard` is now tried FIRST since
+  `navigator.clipboard` fails silently in `file://` QWebEngine pages.
+  (Diagnostic stderr traces from the previous attempt confirmed the
+  delegated handler never fired.)
+- `docs/BETA_TESTING.md` — long-form beta tester guide: install,
+  test matrix (Ask / Plan / Agent / quota / offline / re-link), how
+  to file bugs with the info we actually need.
+
+**Pre-beta audit (documented, no code change):**
+
+- Secrets: `grep -rEn "AIza…|sk-…|eyJhbGciOi…"` outside `.venv` and
+  `node_modules` — no keys committed. Only hits are the local `.env`
+  files, which `.gitignore` excludes and `git ls-files` confirms are
+  not tracked.
+- Supabase RLS: `schema.sql` has `enable row level security` on
+  every table. Only `profiles` and `usage_ledger` expose select-own
+  policies (`(select auth.uid()) = id/user_id`). `waitlist`,
+  `contact_messages`, `device_codes` have RLS on with no policies →
+  service-role-only, as intended.
+- Plugin URL: `tracer_auth.DEFAULT_API_URL = "https://api.tracer.dev"`
+  and `tracer_api._api_url()` reads that default. Localhost only via
+  `TRACER_API_URL` env override or `.tracer.env`.
+
+**Still TODO before flipping traffic to prod:**
+
+- Pin `TRACER_CORS_ORIGINS` to the prod Vercel URL in Render env.
+- Deploy backend (Render) + frontend (Vercel), run one full E2E on
+  prod URLs before inviting testers.
+
+Bumped agent client timeouts + halved MAX_REPAIRS (from earlier in this session):
 
 - `tracer_api.py` per-endpoint timeouts — `/v1/generate` 300s (was 120s),
   `/v1/ask` and `/v1/plan` 45s, `/v1/me` and `/v1/usage` 10s.
-- `agent.MAX_REPAIRS: 2 → 1`. Was making up to 3 LLM calls per Agent
-  send; now caps at 2. Free-tier Pro is slow enough that three calls
-  timed users out. Bump back to 2 once we're on paid Anthropic/OpenAI.
-- Added stderr traces to `PyBridge.copyToClipboard` for the ongoing
-  Copy-button diagnostic.
+- `agent.MAX_REPAIRS: 2 → 1`. Bump back to 2 once we're on paid
+  Anthropic/OpenAI.
 
 ---
 

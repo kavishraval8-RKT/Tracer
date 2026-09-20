@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 import requests
 
 import tracer_auth
+from tracer_version import TRACER_VERSION
 
 
 # Per-endpoint timeouts. Agent's build_with_auto_repair runs the LLM up
@@ -85,7 +86,10 @@ def _post(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
         resp = requests.post(
             f"{_api_url()}{path}",
             json=body,
-            headers={"Authorization": f"Bearer {token}"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Tracer-Version": TRACER_VERSION,
+            },
             timeout=_TIMEOUTS.get(path, _DEFAULT_TIMEOUT_S),
         )
     except requests.exceptions.RequestException as exc:

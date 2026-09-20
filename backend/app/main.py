@@ -5,8 +5,9 @@ usage_ledger) — this backend is stateless. State-shaped operations reach
 Supabase via its REST API (see auth.py).
 """
 import os
+import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .routers import v1
@@ -31,6 +32,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def _access_log(request: Request, call_next):
+    # One line per request. Render/Fly aggregate stdout automatically,
+    # so no logging config needed. user_id is not on the request here
+    # (JWT verify is per-route), so the plugin version + IP + path is
+    # what a bug report can be matched against.
+    start = time.monotonic()
+    resp = await call_next(request)
+    dur_ms = int((time.monotonic() - start) * 1000)
+    print(
+        f"[req] {request.method} {request.url.path} -> {resp.status_code} "
+        f"{dur_ms}ms plugin={request.headers.get('x-tracer-version', '-')} "
+        f"ip={request.client.host if request.client else '-'}",
+        flush=True,
+    )
+    return resp
+
 
 app.include_router(v1.router)
 
