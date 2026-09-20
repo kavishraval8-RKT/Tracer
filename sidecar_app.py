@@ -1600,9 +1600,11 @@ class OverlayShell:
             })
             return
         if "QuotaExceededError" in first:
-            self._add_activity("Err", "[quota] monthly limit reached")
+            # Message shape from tracer_api: "hobby tier: used 210,000 / 200,000 tokens this month"
+            summary = first.split("QuotaExceededError:", 1)[-1].strip()
+            self._add_activity("Err", f"[quota] {summary}")
             self.bridge.assistantMessage.emit({
-                "body": "You've hit your monthly quota. Open Account (top-right of chat) to upgrade.",
+                "body": f"Quota exceeded — {summary}. Open Account (top-right of chat) to upgrade.",
                 "kind": "error",
             })
             return

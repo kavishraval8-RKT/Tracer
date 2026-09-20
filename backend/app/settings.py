@@ -36,6 +36,17 @@ class Settings(BaseSettings):
         "http://localhost:3000", "http://localhost:5173",
     ])
 
+    # === Tier quotas (Slice F) ============================================
+    # Monthly token budget per plan. Values are estimated tokens
+    # (len(text)//4). Stripe webhook will overwrite these once tiers
+    # actually gate real usage. Free tier is generous enough to test the
+    # full plugin loop without hitting 402 in normal usage.
+    tier_quotas: dict[str, int] = Field(default_factory=lambda: {
+        "hobby": 200_000,
+        "basic": 1_000_000,
+        "pro":  10_000_000,
+    })
+
 
 @lru_cache
 def get_settings() -> Settings:

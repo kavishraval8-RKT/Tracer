@@ -269,11 +269,15 @@ progress events only. Every phase below stops at a shippable state.
   rotation for single-plugin-per-user enforcement, `/activate` page
   frontend, plugin Login button + polling loop, JWT storage in
   `%APPDATA%\Tracer\token.json`.
-- [ ] **SaaS-3 — LLM proxy** (partial — quota deferred to Slice F).
-  Landed: `/v1/generate|ask|plan|me` mirror the agent shape and are
-  gated by the JWT dependency; plugin's workers cut over to HTTP via
-  `tracer_api.py`. Still pending: quota enforcement + usage_ledger
-  writes, SSE progress events.
+- [x] **SaaS-3 — LLM proxy + quota** (SSE deferred). `/v1/generate|ask|plan|me`
+  gated by the JWT dependency; plugin routes via `tracer_api.py`.
+  Every request runs `quota.check_quota` before the LLM call and
+  writes a `usage_ledger` row after — 402 when over the tier budget.
+  New `GET /v1/usage` returns `{used_tokens, quota_tokens,
+  remaining_tokens}` for the dashboard. Token counting is estimated
+  (`len//4`); metadata-driven counting deferred until agent.py's
+  return shape changes for other reasons. SSE progress events still
+  pending.
 - [ ] **SaaS-4 — Deploy**: Render service, health probes on cold start,
   plugin cloud-down error UX (no BYOK fallback — hard fail with clear
   message).

@@ -405,16 +405,37 @@ curl.exe -i -H "Authorization: Bearer $($tok1.access_token)" http://127.0.0.1:81
   drag handler was swallowing button clicks (nested `<button>` inside
   the drag zone → `startDrag()` fires → `click` never dispatches).
 
-### Not landed (Slice F + deploy + Stripe)
+**Slice F — Quota + usage ledger (this commit).**
+- Tier quotas defined in `backend/app/settings.py` — hobby: 200k /
+  basic: 1M / pro: 10M tokens per calendar month.
+- `backend/app/quota.py` handles: `check_quota` sums the current
+  month's `usage_ledger` rows via Supabase REST and raises HTTP 402
+  with `{tier, used_tokens, quota_tokens}` when the budget is used up.
+  `write_ledger` inserts one row per request. Token counting is
+  estimated `len(text) // 4` — good enough for tier granularity.
+- Every `/v1/generate|ask|plan` route runs quota → agent →
+  write_ledger. Failed calls still write a ledger row with
+  `status_code=500` so we can see repeated failure patterns.
+- Sync `agent.*` calls are wrapped in `run_in_threadpool` so they
+  don't block the async event loop (the first symptom that surfaced
+  before that fix was plugin requests timing out at 120s while a
+  Gemini call held the loop).
+- New `GET /v1/usage` returns `{tier, used_tokens, quota_tokens,
+  remaining_tokens}` — the /billing page reads this to render the
+  progress bar (dashboard PR is separate).
+- Plugin 402 handling surfaces the numeric detail: chat bubble
+  reads *"hobby tier: used 210,000 / 200,000 tokens this month.
+  Open Account (top-right of chat) to upgrade."*
 
-- **Slice F — Quota + usage ledger** (next up). Every `/v1/*` request
-  writes a `usage_ledger` row and rejects with `402 Payment Required`
-  when the user's monthly quota is exceeded. Plugin's 402 error path is
-  already wired but unreachable until this ships.
+### Not landed
+
 - **SaaS-4 — Deploy** to Render + Vercel with `api.<domain>` and
   `<domain>` respectively. Plugin URL defaults point to prod.
 - **SaaS-5 — Stripe subscription tiers.** Free / Basic / Pro quotas.
   Webhook flips `profiles.plan` and resets `tokens_used_this_period`.
+- **Usage dashboard on /billing** — reads `/v1/usage` for a progress
+  bar. Separate PR.
+- **SSE token streaming** — deferred; progress events cover UX.
 
 ### Deferred entirely (see DEFERRED.md)
 

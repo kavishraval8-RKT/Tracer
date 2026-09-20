@@ -95,7 +95,14 @@ def _post(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
             detail = resp.json().get("detail", {})
         except ValueError:
             detail = {}
-        raise QuotaExceededError(detail.get("error") or "quota_exceeded")
+        used = detail.get("used_tokens")
+        quota_tokens = detail.get("quota_tokens")
+        tier = detail.get("tier", "hobby")
+        if used is not None and quota_tokens is not None:
+            msg = (f"{tier} tier: used {used:,} / {quota_tokens:,} tokens this month")
+        else:
+            msg = detail.get("error") or "quota_exceeded"
+        raise QuotaExceededError(msg)
 
     if resp.status_code >= 500:
         raise CloudUnreachableError(f"backend {resp.status_code}: {resp.text[:200]}")
