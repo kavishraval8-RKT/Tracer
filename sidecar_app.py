@@ -725,9 +725,13 @@ class PyBridge(QObject):
     def copyToClipboard(self, text: str) -> None:
         # navigator.clipboard fails in QWebEngineView (setHtml pages aren't
         # a "secure context") — route through Qt's own clipboard.
+        print(f"[bridge] copyToClipboard len={len(text or '')}", file=sys.stderr, flush=True)
         cb = QGuiApplication.clipboard()
         if cb is not None:
             cb.setText(text or "")
+            print("[bridge] copied to Qt clipboard", file=sys.stderr, flush=True)
+        else:
+            print("[bridge] QGuiApplication.clipboard() returned None", file=sys.stderr, flush=True)
 
     @Slot(result="QVariant")
     def listUndoHistory(self) -> List[Dict[str, Any]]:

@@ -37,7 +37,18 @@ import requests
 import tracer_auth
 
 
-TIMEOUT_S = 120.0  # generate can take a while with the repair loop
+# Per-endpoint timeouts. Agent's build_with_auto_repair runs the LLM up
+# to 3 times (initial + 2 repair passes) plus a local schematic-backend
+# roundtrip each turn — 300s covers a slow free-tier Pro run without
+# leaving the plugin hung indefinitely on a real backend crash.
+_TIMEOUTS = {
+    "/v1/generate": 300.0,
+    "/v1/ask":       45.0,   # Flash returns in 2-8s typically
+    "/v1/plan":      45.0,
+    "/v1/me":        10.0,
+    "/v1/usage":     10.0,
+}
+_DEFAULT_TIMEOUT_S = 60.0
 
 
 class NotAuthenticatedError(RuntimeError):
@@ -75,7 +86,7 @@ def _post(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
             f"{_api_url()}{path}",
             json=body,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=TIMEOUT_S,
+            timeout=_TIMEOUTS.get(path, _DEFAULT_TIMEOUT_S),
         )
     except requests.exceptions.RequestException as exc:
         raise CloudUnreachableError(f"network: {exc}") from exc

@@ -1,5 +1,11 @@
 # Tracer — Architecture Roadmap
 
+> **What already shipped is in [CHANGELOG.md](CHANGELOG.md).** This file
+> covers what's *next*. The "Slice A–J" names that appear elsewhere in
+> discussion or older commit messages map to the SaaS phases below —
+> the mapping table in the CHANGELOG is the reconciliation.
+
+
 Where the code is, what to build next, in what order, and why. Living
 document — edit as decisions land. Companion to [SETUP.md](../SETUP.md)
 (usage) and [DEFERRED.md](DEFERRED.md) (scoped-but-not-built items).

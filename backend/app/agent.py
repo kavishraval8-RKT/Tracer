@@ -95,7 +95,9 @@ MAX_CLARIFICATIONS = 4
 
 # The layout engine rejects a geometry it cannot route. Handing the complaint
 # back to Gemini fixes it often enough to be worth the round trip.
-MAX_REPAIRS = 2
+MAX_REPAIRS = 1  # was 2 — free-tier Pro is slow enough that 3 total
+                 # LLM calls (initial + 2 repairs) times out user's session.
+                 # Bump back to 2 once we're on paid Anthropic/OpenAI.
 
 
 #: Parsed once; a long plugin session should not re-stat the file per request.

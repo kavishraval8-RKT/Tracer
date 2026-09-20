@@ -1,5 +1,13 @@
 # Tracer SaaS Architecture
 
+> **A dated feature log lives in [CHANGELOG.md](CHANGELOG.md).** This
+> file describes *how the system is put together* and stays stable
+> commit-to-commit; the CHANGELOG names each commit and what it added.
+> The two-scheme naming ("Slice A–J" from mid-session discussion vs.
+> "SaaS-1..5" from the roadmap) is reconciled in a table at the top of
+> the CHANGELOG.
+
+
 End-to-end reference for the cloud-backed pivot: how the KiCad plugin,
 Next.js frontend, Supabase, Python backend, and Gemini fit together. Read
 this to understand *how a plugin request becomes a Gemini reply* — every

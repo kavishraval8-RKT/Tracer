@@ -82,6 +82,9 @@ code loads on next launch.
 - `SETUP.md` — full setup + walkthrough + troubleshooting.
 - `backend/` — Python cloud service (FastAPI). Run locally during dev or
   deploy to Render.
+- `docs/CHANGELOG.md` — **dated log of every commit and what it shipped.**
+  The single source of truth for "what's in this version". Reconciles the
+  Slice A–J / SaaS-1..5 naming.
 - `docs/SAAS_ARCHITECTURE.md` — end-to-end architecture reference.
 - `docs/ROADMAP.md` — phased plan and status.
 - `docs/DEFERRED.md` — features scoped but deliberately not built (with
