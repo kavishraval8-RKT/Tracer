@@ -22,8 +22,8 @@ separate `tracer-frontend/` repo).
 ┌──────────────────────────┐        ┌─────────────────────────────────┐
 │  KiCad Plugin            │        │  Next.js Frontend               │
 │  (tracer-engine/)        │        │  (tracer-frontend/)             │
-│                          │        │                                  │
-│  • PySide6 sidecar       │        │  • Supabase Auth (email/pw)      │
+│                          │        │                                 │
+│  • PySide6 sidecar       │        │  • Supabase Auth (email/pw)     │
 │  • QWebEngineView UI     │        │  • /activate device-flow page   │
 │  • Local FastAPI on 8000 │        │  • Stripe checkout + webhook    │
 │  • agent.py (LOCAL soon  │        │  • /api/device/{code,token}     │
@@ -34,8 +34,8 @@ separate `tracer-frontend/` repo).
            │  (once Slice I lands)               │  service-role key
            ▼                                     ▼
 ┌──────────────────────────┐        ┌─────────────────────────────────┐
-│  Python Cloud Backend    │        │  Supabase                        │
-│  (backend/)              │◄───────┤  • auth.users                    │
+│  Python Cloud Backend    │        │  Supabase                       │
+│  (backend/)              │◄───────┤  • auth.users                   │
 │                          │  REST  │  • profiles (tier, active_jti)  │
 │  • FastAPI on 8100       │  jti   │  • device_codes                 │
 │  • JWT verify (HS256)    │  check │  • usage_ledger (Slice F)       │
