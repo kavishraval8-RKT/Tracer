@@ -42,13 +42,18 @@ def _bearer(request: Request) -> str:
     return header.split(" ", 1)[1].strip()
 
 
-async def _current_active_jti(user_id: str) -> str | None:
-    """Return profiles.active_device_jti for user_id, or None if unset."""
+async def _current_active_jti(user_id: str) -> tuple[bool, str | None]:
+    """Return (supabase_configured, active_device_jti).
+
+    - (False, None) → dev mode, no Supabase — skip freshness check.
+    - (True, "<jti>") → live, plugin must match.
+    - (True, None)   → live, no active plugin (signed out / revoked) — reject.
+    """
     settings = get_settings()
     if not settings.supabase_url or not settings.supabase_service_role_key:
         # Dev fallback: no Supabase configured → skip jti freshness check.
         # Do NOT ship this to prod without a configured Supabase.
-        return None
+        return (False, None)
 
     url = f"{settings.supabase_url}/rest/v1/profiles"
     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -65,8 +70,8 @@ async def _current_active_jti(user_id: str) -> str | None:
         raise HTTPException(status_code=502, detail={"error": "profile_lookup_failed"})
     rows = resp.json()
     if not rows:
-        return None
-    return rows[0].get("active_device_jti")
+        return (True, None)
+    return (True, rows[0].get("active_device_jti"))
 
 
 async def require_user(request: Request) -> CurrentUser:
@@ -93,9 +98,10 @@ async def require_user(request: Request) -> CurrentUser:
         raise HTTPException(status_code=401, detail={"error": "invalid_token"})
 
     # jti freshness — the "one plugin per user" check. A newer activation
-    # rotates active_device_jti on the profile; older tokens go dead.
-    active = await _current_active_jti(sub)
-    if active is not None and active != jti:
+    # rotates active_device_jti on the profile; signing out on the web
+    # clears it. In both cases the plugin's JWT should stop working.
+    configured, active = await _current_active_jti(sub)
+    if configured and active != jti:
         raise HTTPException(status_code=401, detail={"error": "revoked"})
 
     return CurrentUser(id=sub, tier=tier, jti=jti)
