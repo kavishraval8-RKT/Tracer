@@ -1610,9 +1610,8 @@ class OverlayShell:
             self._add_activity("Err", f"[cloud] {summary}")
             self.bridge.assistantMessage.emit({
                 "body": (
-                    "Backend unreachable — check your internet, then try again.\n"
-                    "If this keeps happening, the service may be down: "
-                    "https://tracer.dev/status"
+                    "Backend unreachable — check your internet and that the "
+                    "Tracer backend is running, then try again."
                 ),
                 "kind": "error",
             })

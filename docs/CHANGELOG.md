@@ -53,9 +53,14 @@ tagged commit.)_
   `navigator.clipboard` fails silently in `file://` QWebEngine pages.
   (Diagnostic stderr traces from the previous attempt confirmed the
   delegated handler never fired.)
-- `docs/BETA_TESTING.md` — long-form beta tester guide: install,
-  test matrix (Ask / Plan / Agent / quota / offline / re-link), how
-  to file bugs with the info we actually need.
+- `docs/BETA_TESTING.md` — long-form beta tester guide, **localhost
+  edition**: testers clone both repos, apply the Supabase schema,
+  run `uvicorn` on `:8100` + `npm run dev` on `:3000`, drop a
+  `.tracer.env` next to `sidecar_app.py` to point the plugin at
+  local backends. Covers install, test matrix (Ask / Plan / Agent
+  / quota / offline / re-link), architecture diagram, bug-report
+  checklist with which files/lines to attach. No prod URL is
+  referenced — nothing is deployed yet.
 
 **Pre-beta audit (documented, no code change):**
 
