@@ -249,20 +249,8 @@ class PcbDrcWorker(QObject):
                     f"kicad-cli exit={proc.returncode}; "
                     f"stderr={(proc.stderr or '').strip()[:400]}")
                 return
-            # Shape (KiCad 10 DRC JSON): {violations:[{severity,type,description,items:[{...}]}], unconnected_items:[...], schematic_parity:[...]}
-            v = list(data.get("violations") or [])
-            v += list(data.get("unconnected_items") or [])
-            parity = list(data.get("schematic_parity") or [])
-            v += parity
-            errors = sum(1 for x in v if (x.get("severity") or "").lower() == "error")
-            warnings = sum(1 for x in v if (x.get("severity") or "").lower() == "warning")
-            self.done.emit({
-                "ok": errors == 0,
-                "errors": errors,
-                "warnings": warnings,
-                "parity_mismatches": len(parity),
-                "violations": v[:32],  # cap for UI
-            })
+            # Parse shape in tracer_helpers.parse_drc_json (KiCad 10 DRC JSON).
+            self.done.emit(parse_drc_json(data))
         except FileNotFoundError:
             self.failed.emit("kicad-cli not found")
         except subprocess.TimeoutExpired:
@@ -281,20 +269,15 @@ SIDECAR_PROCS = ("python.exe", "pythonw.exe")
 _MINIMIZED_COORD = -30000
 
 
-def _project_from_title(title: str) -> str:
-    """'tracertest — PCB Editor' -> 'tracertest'. Empty title -> ''."""
-    if not title:
-        return ""
-    for sep in (" — ", " – ", " - "):  # em-dash, en-dash, hyphen
-        if sep in title:
-            return title.split(sep, 1)[0].strip()
-    return title.strip()
-
-
-assert _project_from_title("tracertest — PCB Editor") == "tracertest"
-assert _project_from_title("tracertest - Schematic Editor") == "tracertest"
-assert _project_from_title("") == ""
-assert _project_from_title("KiCad Project Manager") == "KiCad Project Manager"
+# Pure helpers live in tracer_helpers so tests can import them without
+# pulling PySide6 / pywin32 / google-generativeai. Re-exported so the
+# rest of this file's call sites don't need to know.
+from tracer_helpers import (
+    _project_from_title,
+    parse_drc_json,
+    resolve_sch_from_file_history,
+    resolve_sch_from_recent,
+)
 
 
 def _proc_name_for_hwnd(hwnd: int) -> str:
@@ -427,38 +410,17 @@ class KiCadWatcher(QObject):
                 data = json.loads(cfg.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            recent = (data.get("system") or {}).get("recent_projects") or \
-                     data.get("recent_projects") or []
-            for entry in recent:
-                if isinstance(entry, str):
-                    proj_path = entry
-                elif isinstance(entry, dict):
-                    proj_path = entry.get("path") or entry.get("file") or ""
-                else:
-                    continue
-                if not proj_path:
-                    continue
-                # kicad_common lists .kicad_pro paths -- schematic sits alongside.
-                pp = Path(proj_path)
-                sch = pp.with_suffix(".kicad_sch")
-                if sch.name == fname and sch.is_file():
-                    return sch
-                sch_in_dir = pp.parent / fname
-                if sch_in_dir.is_file():
-                    return sch_in_dir
+            hit = resolve_sch_from_recent(fname, data)
+            if hit is not None:
+                return hit
 
         # KiCad's per-editor file histories (eeschema.json / pcbnew.json /
         # kicad.json) hold absolute paths of recently-opened files, most
         # recent first — the authoritative source when kicad_common.json's
-        # recent_projects is empty. eeschema history gives us a .kicad_sch
-        # directly; pcbnew/kicad histories give sibling paths.
+        # recent_projects is empty.
         if appdata:
             for ver in ("10.0", "9.0", "8.0"):
-                for name, suffix in (
-                    ("eeschema.json", ".kicad_sch"),
-                    ("pcbnew.json",   ".kicad_pcb"),
-                    ("kicad.json",    ".kicad_pro"),
-                ):
+                for name in ("eeschema.json", "pcbnew.json", "kicad.json"):
                     hist_cfg = Path(appdata) / "kicad" / ver / name
                     if not hist_cfg.is_file():
                         continue
@@ -466,14 +428,9 @@ class KiCadWatcher(QObject):
                         hdata = json.loads(hist_cfg.read_text(encoding="utf-8"))
                     except (OSError, json.JSONDecodeError):
                         continue
-                    hist = (hdata.get("system") or {}).get("file_history") or []
-                    for entry in hist:
-                        if not isinstance(entry, str) or not entry:
-                            continue
-                        pp = Path(entry)
-                        sch = pp.with_suffix(".kicad_sch")
-                        if sch.name == fname and sch.is_file():
-                            return sch
+                    hit = resolve_sch_from_file_history(fname, hdata)
+                    if hit is not None:
+                        return hit
 
         # Last-ditch: scan common Documents/KiCad tree for a matching file.
         home_kicad = Path.home() / "Documents" / "KiCad"

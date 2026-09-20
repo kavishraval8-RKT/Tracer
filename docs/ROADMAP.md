@@ -10,7 +10,7 @@ Where the code is, what to build next, in what order, and why. Living
 document — edit as decisions land. Companion to [SETUP.md](../SETUP.md)
 (usage) and [DEFERRED.md](DEFERRED.md) (scoped-but-not-built items).
 
-Last updated: 2026-09-14.
+Last updated: 2026-09-20.
 
 ---
 
@@ -48,8 +48,14 @@ Last updated: 2026-09-14.
   Version-fragile (arch doc's original warning still stands).
 - No sync automation. User has to hit F8 in KiCad PCB Editor after inject.
 - No autoroute — deferred with reopen triggers in DEFERRED.md.
-- Test coverage: one 15-line focus-window test. Nothing else.
-- `_history` grows unbounded and is shipped to Gemini every turn.
+- Test coverage: `tests/` at repo root, 35 pytest cases covering
+  `_project_from_title`, schematic-path resolvers, DRC JSON parser,
+  and agent helpers (`_cap_history`, `_to_contents`). Runs in ~2s. No Qt or
+  Gemini calls. Everything else (workers, watcher event loop, snapshot
+  round-trip) is still uncovered.
+- `_history` is capped at `HISTORY_CAP_TURNS = 12` (env override
+  `TRACER_HISTORY_CAP`) so long conversations stay under a fixed token
+  budget.
 
 ---
 
@@ -58,40 +64,48 @@ Last updated: 2026-09-14.
 Order below is intentional. Each item depends on the ones above it landing
 first.
 
-### 2.1 Test harness (blocks everything below)
+### 2.1 Test harness ✅ (initial pass landed 2026-09-20)
 
-**Why first:** every subsequent item touches parsers, workers, or state
-machines that landed this month with zero regression coverage. Refactoring
-without tests is how bugs get introduced silently.
+**Landed:** `tests/` at repo root, 35 cases, `pytest -q` runs in ~2s
+against the backend's `.venv`. No Qt, no win32, no Gemini in the run.
 
-**Scope:**
+**How it works:**
+- Pure logic extracted into `tracer_helpers.py` (stdlib-only) so tests
+  can import without pulling PySide6/pywin32/google-generativeai.
+  `sidecar_app.py` re-exports the helpers so its call sites don't move.
+- `tests/conftest.py` puts the repo root on `sys.path` — no package
+  install needed.
 
-- `tests/` dir at repo root. `pytest`, no fixtures framework needed.
-- One test file per module under test. Fixtures = plain `conftest.py` +
-  files under `tests/fixtures/`.
-- Load-bearing units to cover (in priority order):
-  - `agent._project_from_title` — window-title parser (em-dash / en-dash /
-    hyphen, with and without leading `*`)
-  - `KiCadWatcher.find_open_schematic` (mocked EnumWindows) —
-    schematic-editor hit, PCB-editor fallback, project-name synth,
-    `.kicad_sch` extension recovery
-  - `KiCadWatcher.find_open_schematic` resolver — `eeschema.json` /
-    `pcbnew.json` / `kicad.json` `system.file_history` walks
-  - `PcbDrcWorker._parse` (extract from `run()` first) — the DRC JSON
-    shape from KiCad 10 including `violations`, `unconnected_items`,
-    `schematic_parity`
-  - `_undo_ledger` snapshot + restore round-trip on a tempfile pair
-  - `_project_from_title` + `_pending_clarification` state transitions
+**Covered:**
+- `_project_from_title` — em-dash / en-dash / hyphen, dirty-buffer `*`,
+  no-separator titles, project names with spaces, "first separator wins"
+  (`tests/test_project_title.py`)
+- `parse_drc_json` (extracted from `PcbDrcWorker.run`) — clean board,
+  errors flip `ok`, case-insensitive severity, missing-severity items,
+  unconnected + parity folded in, UI cap at 32
+  (`tests/test_drc_parse.py`)
+- `resolve_sch_from_recent` + `resolve_sch_from_file_history`
+  (extracted from `find_open_schematic`) — KiCad 9 shape, legacy shape,
+  dict entries, sibling-dir lookup, garbage entries, first-match-wins
+  (`tests/test_sch_resolver.py`)
+- `_cap_history` + `_to_contents` — pass-through, boundary at cap,
+  `TRACER_HISTORY_CAP=0` disables, role/text defaults
+  (`tests/test_agent_helpers.py`)
 
-**Anti-goals:**
+**Still uncovered (deferred to a later 2.1 pass, or picked up ad-hoc
+alongside a bug fix):**
+- `KiCadWatcher.find_open_schematic` title-parsing loop (needs a
+  win32gui shim before it can be unit-tested — the resolver *is*
+  covered but the EnumWindows callback isn't).
+- `_undo_ledger` snapshot + restore round-trip on tempfiles.
+- `_pending_clarification` state transitions in `OverlayShell`.
+- Anything under `agent.build_with_auto_repair` — needs a mocked
+  Gemini client and mocked `backend.build_schematic`.
 
-- No headless PySide6 event-loop tests. Qt fixtures are fragile and slow.
-- No Gemini calls in tests. Mock `agent.query_gemini` / `agent.ask_gemini`.
-- No KiCad process tests. Mock `win32gui`.
+**Anti-goals held:** no headless PySide6 event-loop tests, no live
+Gemini calls, no KiCad process tests.
 
-**Exit criterion:** `pytest -q` finishes in under 5 seconds, covers every
-function named above, and fails when any of the last month's fixes is
-reverted.
+**How to run:** `backend/.venv/Scripts/python.exe -m pytest tests/ -q`
 
 ### 2.2 Split `sidecar_app.py`
 
@@ -188,21 +202,22 @@ work. Small runnable script + a corpus of `.kicad_sch` files.
 **Exit criterion:** ≥10 real `.kicad_sch` files round-trip cleanly. Every
 mutator has at least one before/after test.
 
-### 2.5 History cap (small but real)
+### 2.5 History cap ✅ (partially landed — see below)
 
-**Why now:** `_history` is unbounded and shipped in full every turn.
-Gemini charges by input tokens. A user with a 40-turn conversation is
-paying for 40 turns worth of context per new turn.
+**Landed** in the polish-pass commit (`547f55e`) and now covered by
+`tests/test_agent_helpers.py`:
 
-**Scope:**
+- `HISTORY_CAP_TURNS = 12` at module load, `TRACER_HISTORY_CAP` env override.
+- `_cap_history()` truncates from the front (`history[-N:]`), preserving
+  the most recent turns.
+- Applied in `query_gemini` (Agent path) and `_chat_gemini` (Ask/Plan path).
 
-- Cap `_history` at N turns (start at 12) before shipping.
-- Older turns get summarized (single LLM call at cap boundary) into one
-  compact "prior context" system message that carries forward.
-- Config: `TRACER_HISTORY_CAP` env var override.
-
-**Exit criterion:** long conversation stays under a predictable token
-budget; summarization only fires when actually needed.
+**Skipped:** summarization of older turns into a "prior context"
+system message. Reason: the hard cap captures ~90% of the cost/latency
+win with zero extra LLM calls. Summarization needs an extra call per
+cap boundary and its own prompt to tune. **Add when a beta tester
+reports losing context they cared about across the cap boundary** —
+that's the signal that hard truncation isn't enough.
 
 ---
 

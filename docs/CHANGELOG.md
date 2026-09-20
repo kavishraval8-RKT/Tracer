@@ -35,6 +35,37 @@ Commit hashes below are `engine/frontend` when both are involved.
 _(Moves here as work lands. Empty means the working tree matches the last
 tagged commit.)_
 
+**Phase-2.1 test harness (initial pass):**
+
+- `tracer_helpers.py` — stdlib-only home for pure logic that previously
+  lived inline inside `sidecar_app.py`. `sidecar_app.py` re-exports:
+  - `_project_from_title` (moved verbatim — the inline asserts moved
+    to `tests/test_project_title.py`)
+  - `parse_drc_json` (extracted from `PcbDrcWorker.run` — the roadmap
+    called this out explicitly as "extract from run() first")
+  - `resolve_sch_from_recent` / `resolve_sch_from_file_history`
+    (extracted from `KiCadWatcher.find_open_schematic`; the `exists`
+    predicate is injectable so tests never touch the filesystem)
+- `tests/` at repo root — 35 pytest cases, ~2s runtime:
+  - `test_project_title.py` (8 cases)
+  - `test_drc_parse.py` (7 cases)
+  - `test_sch_resolver.py` (11 cases)
+  - `test_agent_helpers.py` (9 cases) — covers `_cap_history` + the
+    attachment-free path of `_to_contents`, reloading the module under
+    a scoped `TRACER_HISTORY_CAP` env var.
+- `tests/conftest.py` — one-liner that puts the repo root on
+  `sys.path` so `import tracer_helpers` and `from backend.app import
+  agent` both work without a package install.
+
+**Roadmap updates:**
+- 2.1 marked ✅ with a "still uncovered" list (KiCadWatcher title loop,
+  undo ledger, clarification state transitions, agent auto-repair).
+- 2.5 marked ✅ partially — the hard cap shipped in the polish pass and
+  now has tests; summarization is deferred until a tester actually
+  reports lost context across the cap boundary.
+- "Test coverage: one 15-line focus-window test" line replaced with the
+  actual current state.
+
 **Pre-beta hardening + beta doc:**
 
 - `tracer_version.py` — single source of truth for plugin version
