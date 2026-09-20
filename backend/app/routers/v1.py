@@ -176,17 +176,13 @@ async def me(user: AuthedUser) -> dict[str, Any]:
 
 @router.get("/usage")
 async def usage(user: AuthedUser) -> dict[str, Any]:
-    """Current-month usage summary. Plugin / web dashboard reads this."""
-    used = await quota._month_usage_tokens(user.id)  # noqa: SLF001 — internal API is fine here
-    from ..settings import get_settings
-    settings = get_settings()
-    q = settings.tier_quotas.get(user.tier, min(settings.tier_quotas.values()))
-    return {
-        "tier": user.tier,
-        "used_tokens": used,
-        "quota_tokens": q,
-        "remaining_tokens": max(0, q - used),
-    }
+    """Two-window usage summary — session (rolling 5h) + weekly (rolling 7d).
+
+    The plugin and the /billing dashboard both read this. Shape stays stable
+    so downstream doesn't have to branch on whether the session window is
+    the tight one or the weekly is.
+    """
+    return await quota.usage_windows(user.id, user.tier)
 
 
 # ---------------------------------------------------------------------------

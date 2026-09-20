@@ -69,6 +69,21 @@ MODEL_CANDIDATES: List[str] = [
 ]
 MODEL_NAME = MODEL_CANDIDATES[0]  # legacy alias; the actual pick comes from _choose_model()
 
+# Ask/Plan modes are plain text and don't need Pro's reasoning; Flash is
+# 3-5x faster and has a much larger daily free-tier quota (250 req/day).
+# Reserve Pro for Agent mode where structured JSON output matters.
+FAST_MODEL_CANDIDATES: List[str] = [
+    "gemini-2.5-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-latest",
+]
+
+# History cap. Every LLM turn re-sends the full conversation; a 20-turn
+# chat re-transmits ~10x more tokens per Ask than the actual prompt. Cap
+# at the last N turns to bound cost + latency. Envelope tunable via env.
+HISTORY_CAP_TURNS = int(os.environ.get("TRACER_HISTORY_CAP", "12"))
+
 _failed_models: set = set()
 _working_model: Optional[str] = None
 BACKEND_URL = "http://127.0.0.1:8000/api/v1/generate"
@@ -529,20 +544,37 @@ _PLAN_SYSTEM = (
 )
 
 
+def _cap_history(history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Keep the last HISTORY_CAP_TURNS turns. A "turn" is one user OR
+    model entry (they alternate), so 12 turns ≈ 6 user + 6 model.
+    """
+    if HISTORY_CAP_TURNS <= 0 or len(history) <= HISTORY_CAP_TURNS:
+        return list(history)
+    return list(history[-HISTORY_CAP_TURNS:])
+
+
 def _chat_gemini(
     prompt: str, history: List[Dict[str, str]], system_instruction: str,
     attachments: Optional[List[Dict[str, str]]] = None,
+    model_candidates: Optional[List[str]] = None,
 ) -> str:
     """Shared plain-text chat path with model rotation. No JSON, no
     clarification handshake — the caller supplies the system prompt that
     shapes the response style (Q&A, plan outline, etc.).
+
+    model_candidates lets Ask/Plan prefer Flash while Agent falls through
+    to the default MODEL_CANDIDATES (Pro-first).
     """
     global _working_model
     genai.configure(api_key=_api_key())
-    convo = list(history) + [{"role": "user", "text": prompt}]
+    convo = _cap_history(history) + [{"role": "user", "text": prompt}]
+    candidates = model_candidates or MODEL_CANDIDATES
     last_error: Optional[Exception] = None
-    for _ in range(len(MODEL_CANDIDATES) + 1):
-        model_name = _choose_model()
+    for model_name in list(candidates) + [None]:
+        if model_name is None:
+            break
+        if model_name in _failed_models:
+            continue
         try:
             model = genai.GenerativeModel(
                 model_name=model_name,
@@ -563,14 +595,18 @@ def _chat_gemini(
 
 def ask_gemini(prompt: str, history: List[Dict[str, str]],
                attachments: Optional[List[Dict[str, str]]] = None) -> str:
-    """Plain Q&A. No circuit output, no clarification handshake, no JSON."""
-    return _chat_gemini(prompt, history, _ASK_SYSTEM, attachments)
+    """Plain Q&A. No circuit output, no clarification handshake, no JSON.
+    Prefers Flash — 3-5x faster than Pro for text Q&A."""
+    return _chat_gemini(prompt, history, _ASK_SYSTEM, attachments,
+                        model_candidates=FAST_MODEL_CANDIDATES)
 
 
 def plan_gemini(prompt: str, history: List[Dict[str, str]],
                 attachments: Optional[List[Dict[str, str]]] = None) -> str:
-    """PLAN mode: describe what would be built without building it."""
-    return _chat_gemini(prompt, history, _PLAN_SYSTEM, attachments)
+    """PLAN mode: describe what would be built without building it.
+    Also uses Flash — outputs are prose, no structured content."""
+    return _chat_gemini(prompt, history, _PLAN_SYSTEM, attachments,
+                        model_candidates=FAST_MODEL_CANDIDATES)
 
 
 def query_gemini(history: List[Dict[str, str]],
@@ -597,7 +633,8 @@ def query_gemini(history: List[Dict[str, str]],
             },
         )
         try:
-            response = model.generate_content(_to_contents(history, attachments))
+            response = model.generate_content(
+                _to_contents(_cap_history(history), attachments))
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             if _is_rotatable_error(exc):

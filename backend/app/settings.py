@@ -36,15 +36,27 @@ class Settings(BaseSettings):
         "http://localhost:3000", "http://localhost:5173",
     ])
 
-    # === Tier quotas (Slice F) ============================================
-    # Monthly token budget per plan. Values are estimated tokens
-    # (len(text)//4). Stripe webhook will overwrite these once tiers
-    # actually gate real usage. Free tier is generous enough to test the
-    # full plugin loop without hitting 402 in normal usage.
-    tier_quotas: dict[str, int] = Field(default_factory=lambda: {
-        "hobby": 200_000,
+    # === Tier quotas — two-window model (Claude-style) ====================
+    # Each tier has BOTH a 5-hour session cap AND a weekly cap.
+    # A request has to fit under both to succeed.
+    #
+    #   session — bounds a single sitting so one user can't drain the
+    #             shared free-tier Gemini pool in an afternoon.
+    #   weekly  — bounds total spend, tied to what a paid plan can
+    #             recover in gross margin.
+    #
+    # 4M Pro/week gives us room to sell $20/mo with real margin even
+    # once we swap the backend to paid Anthropic/OpenAI keys.
+    tier_session_hours: int = 5
+    tier_session_quotas: dict[str, int] = Field(default_factory=lambda: {
+        "hobby":   30_000,   # ~30 short chats before you have to wait
+        "basic":  300_000,
+        "pro":  1_300_000,   # ~1/3 of weekly, so a single sitting can't burn it
+    })
+    tier_weekly_quotas: dict[str, int] = Field(default_factory=lambda: {
+        "hobby":  100_000,
         "basic": 1_000_000,
-        "pro":  10_000_000,
+        "pro":   4_000_000,
     })
 
 

@@ -98,8 +98,19 @@ def _post(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
         used = detail.get("used_tokens")
         quota_tokens = detail.get("quota_tokens")
         tier = detail.get("tier", "hobby")
+        window = detail.get("window", "weekly")
+        reset_hours = detail.get("reset_hours")
         if used is not None and quota_tokens is not None:
-            msg = (f"{tier} tier: used {used:,} / {quota_tokens:,} tokens this month")
+            if window == "session":
+                window_label = f"{reset_hours}-hour session"
+                extra = " Try again in a couple of hours."
+            else:
+                window_label = "weekly"
+                extra = " Resets every 7 days on a rolling window."
+            msg = (
+                f"{tier} tier: used {used:,} / {quota_tokens:,} tokens "
+                f"({window_label}).{extra}"
+            )
         else:
             msg = detail.get("error") or "quota_exceeded"
         raise QuotaExceededError(msg)

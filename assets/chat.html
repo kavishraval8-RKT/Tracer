@@ -361,9 +361,13 @@ function renderAssistant(payload) {
   const m = document.getElementById('messages');
   const body = payload.body || '';
   const row = el('div', 'msg-in flex flex-col items-start');
+  const idx = _copyStore.length;
+  _copyStore.push(body);
+  // Note: keep the raw markdown in _copyStore (not the rendered HTML).
+  // Users pasting into another app expect the source text they saw.
   row.innerHTML = `
     <div class="assistant-bubble">${mdToHtml(body)}</div>
-    <button class="copy-btn" onclick="copyText(this, ${JSON.stringify(body).replace(/"/g,'&quot;')})">
+    <button class="copy-btn" data-copy-idx="${idx}">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" class="w-3 h-3">
         <rect x="5.5" y="5.5" width="8" height="8" rx="1"/>
         <path d="M2.5 10.5v-8a1 1 0 011-1h8"/>
@@ -375,16 +379,25 @@ function renderAssistant(payload) {
   scrollBottom();
 }
 
-function copyText(btn, text) {
+// Message index → raw markdown source. copy buttons carry the index in
+// a data attribute; a delegated click handler at document level reads it
+// and dispatches. This is more robust than JSON.stringify + attribute
+// escaping for messages with quotes, backslashes, emoji, or backticks.
+const _copyStore = [];
+
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('[data-copy-idx]') : null;
+  if (!btn) return;
+  const idx = parseInt(btn.getAttribute('data-copy-idx'), 10);
+  const text = _copyStore[idx];
+  if (typeof text !== 'string') return;
   const flash = () => {
     const orig = btn.innerHTML;
     btn.innerHTML = '✓ Copied';
     setTimeout(() => { btn.innerHTML = orig; }, 1200);
   };
-  // QWebEngineView pages loaded via setHtml aren't a secure context, so
-  // navigator.clipboard.writeText silently rejects. Try it anyway (in case
-  // we ever move to https://), then fall back to Qt's clipboard through
-  // the bridge.
+  // Qt clipboard is the reliable path in QWebEngineView setHtml context.
+  // Try navigator.clipboard first anyway for a future move to https://.
   const useBridge = () => {
     if (pyBridge && pyBridge.copyToClipboard) {
       pyBridge.copyToClipboard(text);
@@ -396,7 +409,7 @@ function copyText(btn, text) {
   } else {
     useBridge();
   }
-}
+});
 
 function setThinking(on) {
   document.getElementById('thinkingRow').classList.toggle('hidden', !on);
@@ -459,6 +472,7 @@ function showChangeActions(on) {
 function clearAll() {
   document.getElementById('messages').innerHTML = '';
   document.getElementById('emptyState').style.display = '';
+  _copyStore.length = 0;
   clearActivity();
   clearChanges();
 }
