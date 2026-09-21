@@ -466,6 +466,62 @@ mirror `tracer-frontend/lib/quotas.ts`. See §7 for details.
 
 ---
 
+### 3.5 Quick-reference summary
+
+For anyone skimming — the same information as §3.1–3.3 in one screen.
+
+#### Plugin (client)
+
+| Layer | Tech | Version | Why |
+|---|---|---|---|
+| KiCad integration | IPC Plugin | KiCad 8/9/10 | Out-of-process, survives KiCad restarts, can render translucent overlays |
+| Sidecar runtime | Python | 3.11+ | Same language as backend; type hints; `run_in_threadpool` semantics |
+| UI framework | PySide6 (Qt) | 6.6+ | Frameless transparency + click-through mask; LGPL, dynamically linked |
+| Chat / dock UI | QWebEngineView + QWebChannel | Qt 6 built-in | Real Chromium; iteration by CSS not widget subclass; two-way Py↔JS bridge |
+| Window discovery | pywin32 | 306+ | KiCad exposes no window API — `EnumWindows` is the fallback |
+| HTTP → backend | `requests` | 2.31+ | Sync is fine here (one call, wait, render); smaller than httpx |
+| Async workers | Qt `QThread` | Qt 6 built-in | Keeps the chat UI responsive during long Agent turns |
+
+#### Backend (our server)
+
+| Layer | Tech | Version | Why |
+|---|---|---|---|
+| Web framework | FastAPI | 0.115+ | Pydantic validation, async, deps-based auth, OpenAPI for free |
+| ASGI server | uvicorn | 0.30+ | FastAPI's default; one-line prod command on Render |
+| Sync-wrapping | `run_in_threadpool` | FastAPI built-in | Keeps event loop free while sync Agent code runs |
+| LLM SDK (Gemini) | google-generativeai | 0.8+ | Free tier for beta; `agent.py` provider layer allows Claude/OpenAI swap |
+| JWT | PyJWT | 2.9+ | HS256 with explicit `algorithms=["HS256"]` (algorithm-confusion safe) |
+| Supabase REST | httpx (async) | 0.27+ | Non-blocking calls inside async routes; 20 lines vs supabase-py's 4 transitive libs |
+| Validation | Pydantic | 2.9+ | Request bodies + `Field(max_length=...)` for payload caps |
+| Config | pydantic-settings | 2.4+ | `.env`-driven, env-var overrides, list types auto-parsed from JSON |
+
+#### Data & auth (Supabase + Next.js)
+
+| Layer | Tech | Version | Why |
+|---|---|---|---|
+| Identity | Supabase Auth | managed | Free ≤50k MAU; email verification + password hashing + OAuth for free |
+| Database | Supabase Postgres | 15 | Relational fits our data; RLS is server-enforced defense in depth |
+| Row security | Postgres RLS | native | Even a buggy app query can't leak another user's data |
+| Frontend | Next.js + React + TS | 16 / 19 / 5 | SSR for SEO on landing; server actions for form handling |
+| CSS | Tailwind CSS | 3 | Component-locality; no CSS-in-JS runtime; JIT small bundle |
+| Frontend host | Vercel | free tier | Zero-config Next.js deploys; global edge; free TLS |
+| Backend host (planned) | Render | free tier | GitHub-connect deploy; stdout log aggregation; free custom domain + TLS |
+| Payments (deferred) | Stripe | — | Industry standard; schema already Stripe-ready; wire when a user asks |
+
+#### Cross-cutting
+
+| Concern | Tech | Where |
+|---|---|---|
+| Auth transport | Device Flow (RFC 8628) + HS256 JWT | Plugin ↔ frontend for pairing; plugin → backend for every call |
+| Single-plugin-per-user | `jti` freshness check against `profiles.active_device_jti` | `backend/app/auth.py:98` |
+| Quotas | Two rolling windows (5h session + 7d weekly) | `backend/app/quota.py` |
+| History cap | Hard truncate at 12 turns | `backend/app/agent.py::_cap_history` |
+| Repair loop | `MAX_REPAIRS=1` (2 once on paid API) | `backend/app/agent.py::build_with_auto_repair` |
+| Testing | pytest, no Qt/win32/Gemini in tests | `tests/` — 35 cases, ~2s |
+| Access logging | one line per request → stdout → Render dashboard | `backend/app/main.py::_access_log` |
+
+---
+
 ## 4. Repositories & how they fit
 
 The project is split across **two repos**:
