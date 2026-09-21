@@ -47,53 +47,422 @@ KiCad's window with pywin32-based window detection.
 
 ---
 
-## 3. Tech stack (with why-this-not-that)
+## 3. Tech stack — in depth
 
-### Plugin (client)
+The stack splits into three parts: the **plugin** (runs on the user's
+Windows PC inside KiCad), the **backend** (a small FastAPI server we
+host), and **data & auth** (Supabase + a Next.js frontend for account
+management). Each layer is explained with what it does, why we picked
+it, and what we considered instead.
 
-| Layer | Tech | Why this |
-|---|---|---|
-| KiCad plugin API | KiCad 10 IPC plugin | Native plugin format; can spawn processes |
-| Sidecar process | Python 3.11+ | KiCad's Python; avoids version mismatch |
-| UI | PySide6 (Qt) | Frameless overlays, transparency, `QRegion` mask for click-through — wxPython (KiCad's own toolkit) can't do that reliably |
-| Chat & dock HTML | QWebEngineView + QWebChannel | Real browser rendering; two-way Python↔JS bridge for signals |
-| Window detection | pywin32 | KiCad doesn't publish window handles; we EnumWindows |
-| HTTP to backend | `requests` | Stdlib-adjacent; no async needed on client side |
+---
 
-**Why Windows-only right now:** pywin32 window discovery + Ctrl+F5 reload
-keystroke are Windows-specific. Ports to macOS (AppleScript) and Linux
-(xdotool/wmctrl) are documented in `docs/ROADMAP.md` Phase 4.1.
+### 3.1 Plugin (client-side, runs on user's PC)
 
-### Backend
+#### KiCad 10 IPC Plugin format
 
-| Layer | Tech | Why this |
-|---|---|---|
-| Server framework | **FastAPI** | Pydantic-native validation, async, first-class type hints |
-| Async runtime | uvicorn | FastAPI's default; standalone-friendly for Render |
-| LLM SDK | google-generativeai (Gemini) | Currently free-tier; swappable via `agent.py` provider layer |
-| Sync wrapping | `fastapi.concurrency.run_in_threadpool` | Agent code is sync; keeps FastAPI's event loop unblocked |
-| JWT verify | PyJWT | HS256 with `jti` freshness against Supabase |
-| HTTP → Supabase | httpx (async) | Non-blocking Supabase REST calls |
+**What it is.** KiCad ships two plugin models: the older *Action
+Plugin* (in-process wxPython, one script per action) and the newer
+*IPC Plugin* (out-of-process, KiCad talks to your process over a socket
+and via file conventions). We use the IPC form.
 
-### Data & auth
+**What it does for us.** Registers Tracer in KiCad's `Tools → External
+Plugins` menu. When the user clicks it, KiCad spawns
+`sidecar_launcher.py`, which detaches a Python sidecar and returns
+control to KiCad immediately.
 
-| Layer | Tech | Why this |
-|---|---|---|
-| Auth | **Supabase Auth** | Email/password, JWT, RLS out of the box — cheaper than Auth0/Clerk |
-| DB | Supabase PostgreSQL | Same project, one login, no cross-service secrets |
-| RLS | Postgres row-level security | Users can only ever see their own rows; enforced in the DB, not the app |
-| Frontend framework | Next.js 16 + React 19 + TypeScript | SSR for landing/legal pages; server actions for form handling |
-| Frontend hosting | **Vercel** | Zero-config Next.js deploys; free tier fits us for beta |
-| Backend hosting (planned) | **Render** | Free tier, GitHub-connect deploy, stdout log aggregation |
-| Payments (deferred) | Stripe | Industry standard; webhook mints subscription → tier upgrade in `profiles` |
+**Why this, not Action Plugin.** Action plugins run in KiCad's own
+Python interpreter, which is wxPython-based. They can't create the
+frameless-translucent overlays we need, they die when KiCad reloads a
+project, and any exception crashes KiCad. IPC decouples us from KiCad's
+lifecycle entirely.
 
-### The one non-obvious choice
+**Version:** KiCad 8 and 9 both work; KiCad 10 is what we test against.
 
-**Two-window quota model** (Claude-style) instead of the usual "monthly
-budget". Every request has to fit under **both** a rolling 5-hour
-"session" cap **and** a rolling 7-day "weekly" cap. Reason: prevents a
-single user from draining our shared free-tier Gemini quota (25 req/day
-for ALL users of the service) in an afternoon. See §7 for numbers.
+#### Python 3.11+ sidecar
+
+**What it is.** A standalone Python process (`sidecar_app.py`, ~1550
+lines) that owns all our UI, workers, and state.
+
+**Why Python.** KiCad's own scripting is Python; users who install
+plugins tend to have Python installed already. FastAPI needs Python on
+the backend anyway; sharing the language means we can share type
+definitions (`agent.py` compiles unchanged on both sides).
+
+**Why 3.11+.** `run_in_threadpool` semantics, structural pattern
+matching, better error tracebacks. Anything older doesn't buy us
+anything at this project's size.
+
+**Alternatives considered.** Node.js sidecar (would let us reuse the
+frontend team's TS skills, but no LLM SDK parity with backend);
+Electron (much bigger install footprint, users would notice); pure
+Rust (fast but no LLM ecosystem, and we'd have to hand-write the
+schematic parser).
+
+#### PySide6 (Qt for Python) for UI
+
+**What it is.** Official Python bindings for the Qt UI framework. Same
+library that powers KiCad itself under the hood.
+
+**What it does for us.** Two frameless translucent windows (chat
+panel + dock pill) glued to KiCad's window. Real graphics acceleration,
+proper input handling, a `QRegion` mask so clicks in the transparent
+areas of our pill fall through to KiCad instead of being swallowed.
+
+**Why this, not wxPython.** wxPython is KiCad's own toolkit — using
+the same one seemed obvious at first. But wxPython on Windows can't
+reliably render translucent frameless windows and its input-region
+masking is broken. Qt does both natively. Bonus: `QWebEngineView` is
+a real Chromium — we render our chat UI as HTML/CSS/JS instead of
+hand-drawn Qt widgets.
+
+**Alternatives considered.** Tkinter (ships with Python, no
+transparency); wxPython (see above); pywebview (Chromium wrapper —
+but no reliable way to glue it to KiCad's window position);
+Electron (huge install).
+
+**License note.** Qt/PySide6 is LGPL v3. We link dynamically (which is
+what pip installing does), so LGPL doesn't infect Tracer's own source.
+No commercial-license fee needed.
+
+#### QWebEngineView + QWebChannel
+
+**What it is.** `QWebEngineView` is Qt's Chromium widget — a real
+browser inside your app. `QWebChannel` is Qt's built-in bridge that
+lets JavaScript in that browser call Python methods and vice-versa.
+
+**What it does for us.** The whole chat panel and dock are HTML +
+Tailwind CSS + vanilla JS — no Qt-widget bespoke UI. Python's
+`PyBridge` class exposes methods like `sendMessage`,
+`copyToClipboard`, `login`; the JS calls `pyBridge.sendMessage(text)`
+and Python receives it. Signals go the other way: Python emits
+`assistantMessage` → JS's `renderAssistant` renders it.
+
+**Why this, not native Qt widgets.** Iteration speed. Changing the
+chat bubble style is one CSS line, not a widget subclass. Onboarding
+someone with web experience is one afternoon, not one week of Qt
+concepts.
+
+**Alternatives considered.** Pure `QLabel`/`QTextEdit` widgets (slow
+to iterate, ugly); embedding React via WebView (works, but adds a
+build step to the plugin distribution which is a nightmare with KiCad's
+plugin packaging).
+
+#### pywin32 for window detection
+
+**What it is.** Python bindings for the Win32 API — the low-level
+Windows system calls.
+
+**What it does for us.** Two jobs. First: `EnumWindows` finds KiCad's
+main window handle so we can glue Tracer's overlays to it and follow
+its geometry as the user moves KiCad around. Second: `keybd_event`
+sends a synthetic Ctrl+F5 to KiCad after we edit a `.kicad_sch` so
+KiCad reloads the file.
+
+**Why not something cross-platform.** There isn't a good one. KiCad
+doesn't expose its window handle through any API. Every OS has its
+own tricks: Windows uses `EnumWindows`, macOS uses AppleScript /
+`osascript`, Linux uses `xdotool` or `wmctrl` depending on the WM.
+Roadmap phase 4.1 wraps all three behind a `platform_win.py` /
+`platform_mac.py` / `platform_linux.py` split.
+
+#### `requests` for HTTP to backend
+
+**What it is.** The de-facto sync HTTP client in Python.
+
+**Why this, not httpx or aiohttp.** The plugin is already spending
+most of its wall-clock time waiting on the LLM. Async on the client
+side buys us nothing — we call one endpoint, we wait for the reply,
+we show it. `requests` is smaller, more stable, and every Python dev
+alive knows how to debug it.
+
+**Where it's used.** `tracer_auth.py` for the device-flow polls,
+`tracer_api.py` for the `/v1/*` calls. Timeouts per-endpoint
+(`_TIMEOUTS` dict): 300s for `/v1/generate` (Agent runs a repair
+loop), 45s for Ask/Plan, 10s for `/v1/me` and `/v1/usage`.
+
+---
+
+### 3.2 Backend (our FastAPI server)
+
+#### FastAPI 0.115+
+
+**What it is.** A modern Python web framework. Type-hints define the
+request/response shape; Pydantic validates payloads automatically;
+async is first-class.
+
+**What it does for us.** Exposes `/v1/ask`, `/v1/plan`, `/v1/generate`,
+`/v1/me`, `/v1/usage`, `/health`, `/version`. Handles the JWT check as
+a FastAPI dependency (`AuthedUser = Annotated[CurrentUser,
+Depends(require_user)]`) so any route that adds `user: AuthedUser`
+gets the check automatically.
+
+**Why this, not Flask or Django.** Django is too heavy for a
+stateless proxy. Flask needs Flask-Pydantic, Flask-JWT, Flask-CORS,
+Flask-async — five plugins to get what FastAPI gives out of the box.
+Also: FastAPI's docs (`/docs`) generate an OpenAPI schema for free,
+which will matter if we ever build a public API tier.
+
+**Alternatives considered.** Litestar (newer, smaller ecosystem);
+Starlette raw (FastAPI is Starlette + Pydantic + DI, so this is what
+we already use); Node.js/Express (would fragment the language stack).
+
+#### uvicorn
+
+**What it is.** An ASGI server — the thing that actually accepts HTTP
+connections and hands them to FastAPI's async code.
+
+**Why this.** FastAPI's default. Two-line command in prod:
+`uvicorn app.main:app --host 0.0.0.0 --port $PORT`. Render, Fly, DO,
+and every other Python host recognizes it.
+
+**Not:** hypercorn (HTTP/2 support we don't need), gunicorn+uvicorn
+workers (only matters when you scale past one dyno).
+
+#### google-generativeai (Gemini SDK)
+
+**What it is.** Google's official Python SDK for the Gemini API.
+
+**What it does for us.** Everything under `agent.query_gemini` and
+`agent.ask_gemini` uses it. Handles model routing, streaming (which
+we don't use yet), and safety-setting configuration.
+
+**Why Gemini right now.** Free tier is generous enough for beta
+(25 Pro req/day, 250 Flash/day — per-key, so shared across our users).
+Google gives new accounts real free credits without a card. No credit
+card on file = no bill shock.
+
+**Post-beta plan.** `agent.py` already has a `MODEL_CANDIDATES`
+fallback chain and a `_working_model` register. Swapping to
+Anthropic's `anthropic` SDK is a `_chat_gemini` → `_chat_claude`
+function swap; the caller signature (`(prompt, history, attachments)
+→ str`) doesn't change. Same for OpenAI's `openai` SDK.
+
+#### `fastapi.concurrency.run_in_threadpool`
+
+**What it is.** A helper that runs a sync function on FastAPI's
+thread pool, freeing the async event loop.
+
+**Why we need it.** Our `agent.build_with_auto_repair` is synchronous
+(it makes blocking calls to the Gemini SDK and to the local schematic
+validator). If we called it directly from an `async def` route, the
+whole event loop would freeze during the 30-120s Agent turn — nothing
+else in the process could respond, including `/v1/usage` requests
+from the same user.
+
+**How.** `result = await run_in_threadpool(agent.build_with_auto_repair,
+prompt, history, ...)`. The route stays `async`, the event loop
+stays free, other requests process normally.
+
+#### PyJWT (JWT verify)
+
+**What it is.** The mainstream Python JWT library.
+
+**What it does for us.** Decodes the `Authorization: Bearer <token>`
+header using our `DEVICE_JWT_SECRET` (HS256) and checks all the
+required claims (`exp`, `iat`, `sub`, `jti`) exist. Raises
+`ExpiredSignatureError` / `InvalidTokenError` on failure, which our
+`auth.py` maps to 401.
+
+**Why this over python-jose.** Fewer transitive deps; actively
+maintained; we don't need JOSE's RSA/ES support because our JWTs are
+HS256.
+
+**Security note.** We explicitly pass
+`algorithms=["HS256"]` on decode — never trust the JWT header's
+`alg` field alone, that's the "algorithm confusion" attack path.
+
+#### httpx (async → Supabase REST)
+
+**What it is.** A modern Python HTTP client — sync and async.
+
+**Why we use it on the backend.** Supabase's REST endpoint is what we
+call for the `jti` freshness check and the `usage_ledger` reads /
+writes. Those calls happen inside FastAPI's async request handler,
+so they need to be async themselves. `httpx.AsyncClient` fits
+cleanly. We time out at 5 seconds per call — if Supabase is slow, we
+fail fast rather than pile up requests.
+
+**Not `supabase-py`.** The official Python client is sync-only and
+brings in `postgrest-py`, `gotrue-py`, `realtime-py`, `storage3` — 4
+transitive libraries we don't need for the two REST calls we make.
+`httpx + hand-written URLs` is 20 lines and zero magic.
+
+---
+
+### 3.3 Data & auth
+
+#### Supabase Auth
+
+**What it is.** A managed identity service. Sign-up, sign-in,
+password reset, email verification, magic links, OAuth providers —
+all behind a REST API.
+
+**What it does for us.** Handles the *web-side* login flow. When a
+user creates a Tracer account on the Next.js site, Supabase Auth
+handles the email verification, password hashing (bcrypt), and issues
+a session cookie. Our device-flow code then reads
+`supabase.auth.getUser()` to know who's approving a plugin's
+activation code.
+
+**Why this, not Auth0 / Clerk / rolling our own.** Auth0 charges
+$0.023/MAU past the free tier — economically hostile at scale. Clerk
+is nicer UX but $0.02/MAU and vendor-locks us to their JS SDK.
+Rolling our own means writing password-reset flows, email
+verification, session management, and OAuth in-house — a
+security-critical afternoon that turns into a permanent maintenance
+burden. Supabase Auth is free up to 50k MAU, hosted on the same
+Supabase project as our DB, and speaks standard OAuth 2.
+
+#### Supabase Postgres
+
+**What it is.** A managed Postgres 15 database.
+
+**What it does for us.** Stores everything persistent: `profiles`
+(one per user, tier + jti + Stripe fields), `usage_ledger` (one row
+per LLM request), `device_codes` (pending activation codes),
+`waitlist` and `contact_messages` (marketing forms). Schema is
+`tracer-frontend/supabase/schema.sql`.
+
+**Why Postgres, not Mongo/DynamoDB/etc.** Every relationship we have
+is naturally relational (`usage_ledger` FK to `auth.users`;
+`profiles` PK identical to `auth.users.id`). Constraints and RLS are
+enforced in the DB, not the app. We're never going to outgrow it at
+beta scale.
+
+**Free tier limits.** 500MB DB, 2GB bandwidth/mo, unlimited API
+requests. Enough for a few thousand users. Supabase Pro ($25/mo)
+raises to 8GB DB + 50GB bandwidth — the trigger to upgrade is when
+`usage_ledger` starts pushing 500MB, which won't happen this year.
+
+#### Row-Level Security (RLS)
+
+**What it is.** Postgres' native "policies on rows" feature. Each
+policy says which rows a role can `SELECT` / `INSERT` / `UPDATE` /
+`DELETE`.
+
+**What it does for us.** Every table has RLS *enabled*. Only two
+policies are actually permissive:
+
+- `profiles`: users can `SELECT` their own row (`auth.uid() = id`)
+- `usage_ledger`: users can `SELECT` their own row (`auth.uid() = user_id`)
+
+Everything else (writes to `profiles`, all access to `device_codes`,
+`waitlist`, `contact_messages`) is service-role-only — the app has to
+use the admin client (which bypasses RLS with the service-role key)
+to write those.
+
+**Why this matters.** Even if we make a bug in a Next.js route that
+queries the wrong table, RLS is a second wall: an anon or authenticated
+user's key can only ever see rows they're explicitly allowed to. It's
+defense in depth.
+
+#### Next.js 16 + React 19 + TypeScript
+
+**What it is.** Meta's/Vercel's React framework. Handles SSR
+(server-side rendering), routing, server actions, and image
+optimization.
+
+**What it does for us.** Serves the marketing site (`/`, `/pricing`,
+`/contact`, `/privacy`, `/refund`), the auth pages (`/signup`,
+`/signin`), the device-flow confirmation page (`/activate`), and the
+billing dashboard (`/billing`). Server actions (`lib/actions/*.ts`)
+handle form POSTs without needing a separate API layer.
+
+**Why Next.js.** SSR gives our public pages proper SEO (a plain SPA
+would fail here — engineers googling "KiCad AI plugin" won't find us).
+Server actions mean the device-flow mint code runs on Vercel's servers
+with the service-role key, never in the browser. And it's the framework
+Vercel is designed around, so deploys are `git push` and done.
+
+**Alternatives considered.** SvelteKit (smaller community for hiring),
+Remix (less traction), plain React (no SSR = SEO problem).
+
+#### Vercel (frontend hosting)
+
+**What it is.** A managed PaaS for Next.js and static sites.
+GitHub-connected — every push to `main` deploys automatically.
+
+**Why this.** Free tier is generous (100GB bandwidth / month,
+unlimited requests). Global edge network makes the landing page load
+fast worldwide. Zero configuration for a Next.js app — Vercel *is*
+Next.js's home.
+
+**When we outgrow it.** Vercel's pricing model gets aggressive if we
+serve API-heavy traffic (100 GB-hours of function execution / month
+free, then $$$). For us that's fine — our expensive traffic (LLM
+calls) doesn't go through Vercel at all; the plugin talks straight to
+the FastAPI backend.
+
+#### Render (backend hosting — planned)
+
+**What it is.** A managed PaaS specifically for backend services
+(Docker containers, Python, Node, etc.). Also GitHub-connected.
+
+**Why this.** Free tier for web services (750h/mo — enough for one
+always-on service, minus a 15min-idle sleep). One-click custom
+domains + free TLS via Let's Encrypt. `[req]` log lines from our
+`main.py` middleware appear in Render's dashboard automatically.
+
+**Alternatives considered.**
+- **Fly.io** — no sleep on free tier, but needs a Dockerfile.
+- **Railway** — $5/mo credit runs out fast under real traffic.
+- **DigitalOcean App Platform** — removed from GitHub Education pack.
+- **Oracle Always Free** — Oracle's UI is painful; account reclamation
+  risk.
+- **Azure App Service** — Education credit ($100) is enough, but
+  Azure's Python deploy story is genuinely bad.
+
+Render is the smallest-friction option that still runs 24/7 for free
+during beta.
+
+**Cold-start note.** Render free-tier sleeps after 15 min idle; wake-up
+adds ~30-45s to the first request. Acceptable for beta traffic
+patterns. When it becomes a real complaint, Render Starter is $7/mo
+and always-on.
+
+#### Stripe (payments, deferred)
+
+**What it is.** The standard for online payments.
+
+**What it does for us (once wired).** Handles credit-card checkout for
+Basic/Pro subscriptions. On successful subscription, Stripe fires a
+webhook to our backend; we update `profiles.plan` accordingly. On
+cancellation, same thing in reverse.
+
+**Why deferred.** No paying users to test with. The schema is
+Stripe-ready (`profiles.stripe_customer_id`,
+`profiles.stripe_subscription_id`, `profiles.current_period_end`
+already exist and are indexed) so wiring it is a ~1-day task when the
+first user asks how to pay us.
+
+**Why Stripe, not Razorpay / Paddle.** Razorpay is India-specific and
+harder to test from outside India. Paddle handles VAT for you but
+takes a 5% cut vs. Stripe's 2.9% + $0.30. If we go India-first with
+UPI, we'll revisit — but for a global SaaS, Stripe wins.
+
+---
+
+### 3.4 One non-obvious design choice: two-window quotas
+
+Almost every SaaS meters usage as a **monthly** number. We use **two
+rolling windows** — a 5-hour "session" cap and a 7-day "weekly" cap
+— and both must pass for a request to succeed.
+
+**Why.** Our upstream (Google's Gemini free tier) has a hard
+25-request-per-day cap **shared across every user of our service**.
+If we only had a monthly budget, a single hobby-tier user could burn
+their entire allocation in one afternoon and kill Gemini access for
+everyone else. The 5-hour session cap prevents that — even a
+fully-drained user can only ruin 5 hours of the day, and other users
+keep working.
+
+**Why 5 hours and 7 days.** Directly modeled on Anthropic's own Claude
+quota shape (a proven pattern with real-world tuning); it maps well to
+"a normal workday of engineering" without being punishing.
+
+**Where the numbers come from.** `backend/app/settings.py` and its
+mirror `tracer-frontend/lib/quotas.ts`. See §7 for details.
 
 ---
 
